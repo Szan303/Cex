@@ -1,143 +1,253 @@
-using Cex.Tokens;
-using System;
 using System.Collections.Generic;
 using System.Text;
+using Cex.Tokens;
 
 namespace Cex.Lexer;
 
 public class Lexer
 {
-    private readonly string _source;
-    private int _position = 0;
-    private int _line = 1;
+    private readonly string _src;
+    private int  _pos  = 0;
+    private int  _line = 1;
 
-    public Lexer(string source) => _source = source;
+    private readonly Stack<int> _indentStack = new();
+    private bool _lineStart = true;
+
+    public Lexer(string src)
+    {
+        _src = src;
+        _indentStack.Push(0);
+    }
 
     public List<Token> Tokenize()
     {
         var tokens = new List<Token>();
 
-        while (_position < _source.Length)
+        while (_pos < _src.Length)
         {
-            char current = _source[_position];
-
-            if (current == '\n')
+            if (_lineStart)
             {
+                EmitIndentTokens(tokens);
+                _lineStart = false;
+            }
+
+            if (_pos >= _src.Length) break;
+            char c = _src[_pos];
+
+            if (c == '\r') { _pos++; continue; }
+            if (c == '\n')
+            {
+                tokens.Add(new Token(TokenType.Newline, "\\n", _line));
                 _line++;
-                _position++;
+                _pos++;
+                _lineStart = true;
                 continue;
             }
 
-            if (char.IsWhiteSpace(current))
+            // single-line comment
+            if (c == '/' && Peek(1) == '/')
             {
-                _position++;
+                while (_pos < _src.Length && _src[_pos] != '\n') _pos++;
                 continue;
             }
 
-            if (current == '\"' || current == '“' || current == '”')
+            if (c == ' ' || c == '\t') { _pos++; continue; }
+
+            // string literal — handle curly quotes
+            if (c == '"' || c == '\u201C' || c == '\u201D')
             {
                 tokens.Add(ReadString());
                 continue;
             }
 
-            if (char.IsLetter(current))
+            if (char.IsLetter(c) || c == '_')
             {
-                string word = ReadWord();
-                tokens.Add(MatchKeywordOrIdentifier(word));
+                tokens.Add(ReadWord());
                 continue;
             }
 
-            if (char.IsDigit(current))
+            if (char.IsDigit(c))
             {
-                string number = ReadNumber();
-                tokens.Add(new Token(TokenType.Number, number, _line));
+                tokens.Add(ReadNumber());
                 continue;
             }
 
-            if (current == '=')
+            switch (c)
             {
-                if (Peek() == '=')
-                {
-                    _position += 2;
-                    tokens.Add(new Token(TokenType.DoubleEquals, "==", _line));
-                }
-                else
-                {
-                    _position++;
-                    tokens.Add(new Token(TokenType.Equals, "=", _line));
-                }
-                continue;
+                case '=':
+                    if (Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.DoubleEquals,"=="));}
+                    else             {_pos++;  tokens.Add(T(TokenType.Equals,      "=" ));}
+                    break;
+                case '!':
+                    if (Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.NotEquals,  "!="));}
+                    else _pos++;
+                    break;
+                case '<':
+                    if (Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.LessEq,     "<="));}
+                    else             {_pos++;  tokens.Add(T(TokenType.Less,        "<" ));}
+                    break;
+                case '>':
+                    if (Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.GreaterEq,  ">="));}
+                    else             {_pos++;  tokens.Add(T(TokenType.Greater,     ">" ));}
+                    break;
+                case '+':
+                    if (Peek(1)=='+'){_pos+=2; tokens.Add(T(TokenType.PlusPlus,   "++"));}
+                    else if(Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.PlusEquals, "+="));}
+                    else             {_pos++;  tokens.Add(T(TokenType.Plus,        "+" ));}
+                    break;
+                case '-':
+                    if (Peek(1)=='-'){_pos+=2; tokens.Add(T(TokenType.MinusMinus, "--"));}
+                    else if(Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.MinusEquals,"-="));}
+                    else             {_pos++;  tokens.Add(T(TokenType.Minus,       "-" ));}
+                    break;
+                case '*':
+                    if (Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.StarEquals, "*="));}
+                    else             {_pos++;  tokens.Add(T(TokenType.Star,        "*" ));}
+                    break;
+                case '/':
+                    if (Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.SlashEquals,"/="));}
+                    else             {_pos++;  tokens.Add(T(TokenType.Slash,       "/" ));}
+                    break;
+                case ':': _pos++; tokens.Add(T(TokenType.Colon,           ":" )); break;
+                case ',': _pos++; tokens.Add(T(TokenType.Comma,           "," )); break;
+                case '.': _pos++; tokens.Add(T(TokenType.Dot,             "." )); break;
+                case '(': _pos++; tokens.Add(T(TokenType.ParenthesisOpen, "(" )); break;
+                case ')': _pos++; tokens.Add(T(TokenType.ParenthesisClose,")" )); break;
+                case '[': _pos++; tokens.Add(T(TokenType.BracketOpen,     "[" )); break;
+                case ']': _pos++; tokens.Add(T(TokenType.BracketClose,    "]" )); break;
+                case '{': _pos++; tokens.Add(T(TokenType.BraceOpen,       "{" )); break;
+                case '}': _pos++; tokens.Add(T(TokenType.BraceClose,      "}" )); break;
+                default:  _pos++; break;
             }
+        }
 
-            if (current == ':')
-            {
-                tokens.Add(new Token(TokenType.Colon, ":", _line));
-                _position++;
-                continue;
-            }
-
-            _position++; // ignorujemy nieznane znaki
+        while (_indentStack.Count > 1)
+        {
+            _indentStack.Pop();
+            tokens.Add(new Token(TokenType.Dedent, "", _line));
         }
 
         tokens.Add(new Token(TokenType.EOF, "", _line));
         return tokens;
     }
 
-    private string ReadWord()
+    // ----------------------------------------------------------------- indent
+    private void EmitIndentTokens(List<Token> tokens)
     {
-        int start = _position;
-        while (_position < _source.Length && (char.IsLetterOrDigit(_source[_position]) || _source[_position] == '[' || _source[_position] == ']'))
-            _position++;
-        return _source.Substring(start, _position - start);
+        int col = 0;
+        while (_pos < _src.Length && (_src[_pos] == ' ' || _src[_pos] == '\t'))
+        {
+            col += _src[_pos] == '\t' ? 4 : 1;
+            _pos++;
+        }
+
+        if (_pos >= _src.Length || _src[_pos] == '\n' || _src[_pos] == '\r') return;
+        if (_src[_pos] == '/' && Peek(1) == '/') return;
+
+        int prev = _indentStack.Peek();
+        if (col > prev)
+        {
+            _indentStack.Push(col);
+            tokens.Add(new Token(TokenType.Indent, "", _line));
+        }
+        else
+        {
+            while (_indentStack.Count > 1 && _indentStack.Peek() > col)
+            {
+                _indentStack.Pop();
+                tokens.Add(new Token(TokenType.Dedent, "", _line));
+            }
+        }
     }
 
-    private string ReadNumber()
+    // ----------------------------------------------------------------- readers
+    private Token ReadWord()
     {
-        int start = _position;
-        while (_position < _source.Length && char.IsDigit(_source[_position]))
-            _position++;
-        return _source.Substring(start, _position - start);
+        int start = _pos;
+        while (_pos < _src.Length && (char.IsLetterOrDigit(_src[_pos]) || _src[_pos] == '_'))
+            _pos++;
+        string word = _src.Substring(start, _pos - start);
+        return Keyword(word);
+    }
+
+    private Token ReadNumber()
+    {
+        int start = _pos;
+        bool isFloat = false;
+        while (_pos < _src.Length && (char.IsDigit(_src[_pos]) || _src[_pos] == '.'))
+        {
+            if (_src[_pos] == '.') isFloat = true;
+            _pos++;
+        }
+        string val = _src.Substring(start, _pos - start);
+        return new Token(isFloat ? TokenType.FloatNumber : TokenType.Number, val, _line);
     }
 
     private Token ReadString()
     {
-        char quote = _source[_position];
-        _position++;
+        _pos++; // skip opening quote
         var sb = new StringBuilder();
-        while (_position < _source.Length && _source[_position] != '\"' && _source[_position] != '”')
+        while (_pos < _src.Length && _src[_pos] != '"' && _src[_pos] != '\u201D' && _src[_pos] != '\n')
         {
-            sb.Append(_source[_position]);
-            _position++;
+            if (_src[_pos] == '\\' && _pos + 1 < _src.Length)
+            {
+                _pos++;
+                sb.Append(_src[_pos] switch
+                {
+                    'n'  => '\n',
+                    't'  => '\t',
+                    '\\' => '\\',
+                    '"'  => '"',
+                    _    => _src[_pos]
+                });
+            }
+            else sb.Append(_src[_pos]);
+            _pos++;
         }
-        _position++;
+        if (_pos < _src.Length) _pos++;
         return new Token(TokenType.StringLiteral, sb.ToString(), _line);
     }
 
-    private char Peek()
-    {
-        return _position + 1 < _source.Length ? _source[_position + 1] : '\0';
-    }
+    // ----------------------------------------------------------------- helpers
+    private char Peek(int offset = 1) =>
+        _pos + offset < _src.Length ? _src[_pos + offset] : '\0';
 
-    private Token MatchKeywordOrIdentifier(string word)
+    private Token T(TokenType t, string v) => new(t, v, _line);
+
+    private Token Keyword(string w) => w switch
     {
-        return word switch
-        {
-            "class" => new Token(TokenType.Class, word, _line),
-            "import" => new Token(TokenType.Import, word, _line),
-            "public" => new Token(TokenType.Public, word, _line),
-            "private" => new Token(TokenType.Private, word, _line),
-            "protected" => new Token(TokenType.Protected, word, _line),
-            "static" => new Token(TokenType.Static, word, _line),
-            "void" => new Token(TokenType.Void, word, _line),
-            "if" => new Token(TokenType.If, word, _line),
-            "else" => new Token(TokenType.Else, word, _line),
-            "print" => new Token(TokenType.Print, word, _line),
-            "int" => new Token(TokenType.Type, word, _line),
-            "String[]" => new Token(TokenType.Type, word, _line),
-            "ASM" => new Token(TokenType.ASM, word, _line),
-            "checkpoint" => new Token(TokenType.Checkpoint, word, _line),
-            "goto" => new Token(TokenType.Goto, word, _line),
-            _ => new Token(TokenType.Identifier, word, _line)
-        };
-    }
+        "import"     => T(TokenType.Import,      w),
+        "class"      => T(TokenType.Class,       w),
+        "extends"    => T(TokenType.Extends,     w),
+        "public"     => T(TokenType.Public,      w),
+        "private"    => T(TokenType.Private,     w),
+        "protected"  => T(TokenType.Protected,   w),
+        "static"     => T(TokenType.Static,      w),
+        "void"       => T(TokenType.Void,        w),
+        "if"         => T(TokenType.If,          w),
+        "else"       => T(TokenType.Else,        w),
+        "while"      => T(TokenType.While,       w),
+        "for"        => T(TokenType.For,         w),
+        "to"         => T(TokenType.To,          w),
+        "break"      => T(TokenType.Break,       w),
+        "continue"   => T(TokenType.Continue,    w),
+        "print"      => T(TokenType.Print,       w),
+        "input"      => T(TokenType.Input,       w),
+        "return"     => T(TokenType.Return,      w),
+        "int"        => T(TokenType.Type,        w),
+        "float"      => T(TokenType.Type,        w),
+        "string"     => T(TokenType.Type,        w),
+        "bool"       => T(TokenType.Type,        w),
+        "true"       => T(TokenType.BoolLiteral, w),
+        "false"      => T(TokenType.BoolLiteral, w),
+        "null"       => T(TokenType.Null,        w),
+        "and"        => T(TokenType.And,         w),
+        "or"         => T(TokenType.Or,          w),
+        "not"        => T(TokenType.Not,         w),
+        "ASM"        => T(TokenType.ASM,         w),
+        "checkpoint" => T(TokenType.Checkpoint,  w),
+        "goto"       => T(TokenType.Goto,        w),
+        "String[]"   => T(TokenType.Type,        w),
+        _            => T(TokenType.Identifier,  w),
+    };
 }

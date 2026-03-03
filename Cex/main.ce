@@ -5,8 +5,11 @@ class Program:
 
 		print "hello world!"
 		int x = 1
-		int y = 1
-		if x == y:
-			print "x equals y"
+		checkpoint a
+		if x == 20:
+			print "x equals 20"
 		else:
-			print "nuh uh"
+			print x
+			x = x + 1
+			goto a
+

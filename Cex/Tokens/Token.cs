@@ -1,53 +1,17 @@
 namespace Cex.Tokens;
 
-public enum TokenType
-{
-    Import,
-    Class,
-    Public,
-    Private,
-    Protected,
-    Static,
-    Void,
-    If,
-    Else,
-    Print,
-        
-    Type,
-    Identifier,
-    Number,
-    StringLiteral,
-        
-    ASM, // Assembler 
-    Checkpoint, // checkpoint
-    Goto, // goto
-        
-    Colon, // :
-    Equals, // =
-    DoubleEquals, // ==
-    Comma, // ,
-    ParenthesisOpen, // (
-    ParenthesisClose, // )
-        
-    Indent,
-    Dedent,
-    EOF,
-}
 public class Token
 {
-    public TokenType Type { get; set; }
-    public string Value { get; set; }
-    public int Line { get; set; }
+    public TokenType Type  { get; }
+    public string    Value { get; }
+    public int       Line  { get; }
 
     public Token(TokenType type, string value, int line)
     {
-        Type = type;
+        Type  = type;
         Value = value;
-        Line = line;
+        Line  = line;
     }
 
-    public override string ToString()
-    {
-        return $"Token({Type}, '{Value}', Line: {Line})";
-    }
+    public override string ToString() => $"Token({Type}, '{Value}', Line:{Line})";
 }
