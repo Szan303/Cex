@@ -1,0 +1,12 @@
+import System
+
+class Program:
+	public static void Main:
+
+		print "hello world!"
+		int x = 1
+		int y = 1
+		if x == y:
+			print "x equals y"
+		else:
+			print "nuh uh"
