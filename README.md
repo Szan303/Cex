@@ -268,14 +268,8 @@ If you run into issues:
 
 ## License
 
-Include your chosen license here (MIT recommended for an educational project).
+MIT.
 
 ---
 
-Thank you — this README should help you use, debug and extend the C! language and its compiler.  
-If you want, I can:
-- generate a concise language reference (cheatsheet),
-- produce example programs and unit tests, or
-- create a small contributor guide with step-by-step change examples.
-
-What would you like next?
+Thank you — this README should help you use, debug and extend the C! language and its compiler. 
