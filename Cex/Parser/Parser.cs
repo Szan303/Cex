@@ -32,7 +32,6 @@ public class Parser
         if (Match(TokenType.Import)) return ParseImport();
         if (Match(TokenType.Class))  return ParseClassDeclaration();
 
-        // access modifiers: public / private / protected / static
         if (Check(TokenType.Public)    || Check(TokenType.Private) ||
             Check(TokenType.Protected) || Check(TokenType.Static))
         {
@@ -42,11 +41,10 @@ public class Parser
             return null;
         }
 
-        // unqualified function:  void foo():  or  int add(int x, int y):
-        if (IsFunctionDeclaration())
-            return ParseFunctionDeclaration();
+        if (IsFunctionDeclaration()) return ParseFunctionDeclaration();
+        if (IsArrayDeclaration())    return ParseArrayDeclaration();
+        if (Match(TokenType.Type))   return ParseVarDecl();
 
-        if (Match(TokenType.Type))       return ParseVarDecl();
         if (Match(TokenType.Checkpoint)) return ParseCheckpoint();
         if (Match(TokenType.Goto))       return ParseGoto();
         if (Match(TokenType.Print))      return ParsePrint();
@@ -63,53 +61,59 @@ public class Parser
         if (Match(TokenType.Indent, TokenType.Dedent, TokenType.Newline))
             return null;
 
-        // prefix: ++x  --x
+        // prefix ++ --
         if (Check(TokenType.PlusPlus) || Check(TokenType.MinusMinus))
         {
-            string op  = Advance().Value;
-            string var = Consume(TokenType.Identifier, "Expected variable name").Value;
-            return new AssignmentStatement { VarName = var, Operator = op };
+            int    line = Peek().Line;
+            string op   = Advance().Value;
+            string var  = Consume(TokenType.Identifier, "Expected variable name").Value;
+            return new AssignmentStatement { VarName = var, Operator = op, Line = line };
         }
 
-        // identifier-based: assignment or function call
         if (Check(TokenType.Identifier))
         {
             string name  = Peek().Value;
+            int    line  = Peek().Line;
             int    saved = _cur;
             Advance();
 
+            // array element assignment
+            if (Check(TokenType.BracketOpen))
+            {
+                Advance();
+                var index = ParseExpression();
+                Consume(TokenType.BracketClose, "Expected ']'");
+                Consume(TokenType.Equals, "Expected '='");
+                var val = ParseExpression();
+                return new ArrayAssignment { Name = name, Index = index, Value = val, Line = line };
+            }
+
+            // function call statement
             if (Check(TokenType.ParenthesisOpen))
-                return ParseFunctionCallStatement(name);
+            {
+                _cur = saved;
+                var callExpr = (CallExpr)ParsePrimaryCall();
+                return new FunctionCall { Name = callExpr.Name, Arguments = callExpr.Args, Line = line };
+            }
 
             if (Match(TokenType.PlusPlus))
-                return new AssignmentStatement { VarName = name, Operator = "++" };
+                return new AssignmentStatement { VarName = name, Operator = "++", Line = line };
             if (Match(TokenType.MinusMinus))
-                return new AssignmentStatement { VarName = name, Operator = "--" };
+                return new AssignmentStatement { VarName = name, Operator = "--", Line = line };
 
-            if (Match(TokenType.PlusEquals, TokenType.MinusEquals,
-                      TokenType.StarEquals,  TokenType.SlashEquals))
+            if (Check(TokenType.PlusEquals)   || Check(TokenType.MinusEquals) ||
+                Check(TokenType.StarEquals)    || Check(TokenType.SlashEquals) ||
+                Check(TokenType.PercentEquals))
             {
-                string op  = Previous().Value;
-                string rhs = ConsumeValue();
-                return new AssignmentStatement { VarName = name, Operator = op, Operand = rhs };
+                string op = Advance().Value;
+                var rhs   = ParseExpression();
+                return new AssignmentStatement { VarName = name, Operator = op, Value = rhs, Line = line };
             }
 
             if (Match(TokenType.Equals))
             {
-                string lhs = ConsumeValue();
-                if (Check(TokenType.Plus)  || Check(TokenType.Minus) ||
-                    Check(TokenType.Star)  || Check(TokenType.Slash) ||
-                    Check(TokenType.Percent))
-                {
-                    string rhsOp  = Advance().Value;
-                    string rhsVal = ConsumeValue();
-                    return new AssignmentStatement
-                    {
-                        VarName  = name, Operator = "=",
-                        Left     = lhs,  RhsOp    = rhsOp, Operand = rhsVal
-                    };
-                }
-                return new AssignmentStatement { VarName = name, Operator = "=", Operand = lhs };
+                var rhs = ParseExpression();
+                return new AssignmentStatement { VarName = name, Operator = "=", Value = rhs, Line = line };
             }
 
             _cur = saved;
@@ -119,19 +123,248 @@ public class Parser
         return null;
     }
 
-    // ---------------------------------------------------------------- lookahead helpers
+    // ================================================================= expressions (Pratt)
+    public Expression ParseExpression() => ParseOr();
 
-    // Detects: [public|private|protected|static]* TYPE|void NAME (|:
+    private Expression ParseOr()
+    {
+        var left = ParseAnd();
+        while (Match(TokenType.Or))
+        {
+            int line  = Previous().Line;
+            var right = ParseAnd();
+            left = new BinaryExpr { Left = left, Op = "||", Right = right, Line = line };
+        }
+        return left;
+    }
+
+    private Expression ParseAnd()
+    {
+        var left = ParseEquality();
+        while (Match(TokenType.And))
+        {
+            int line  = Previous().Line;
+            var right = ParseEquality();
+            left = new BinaryExpr { Left = left, Op = "&&", Right = right, Line = line };
+        }
+        return left;
+    }
+
+    private Expression ParseEquality()
+    {
+        var left = ParseComparison();
+        while (Check(TokenType.DoubleEquals) || Check(TokenType.NotEquals))
+        {
+            int    line  = Peek().Line;
+            string op    = Advance().Value;
+            var    right = ParseComparison();
+            left = new BinaryExpr { Left = left, Op = op, Right = right, Line = line };
+        }
+        return left;
+    }
+
+    private Expression ParseComparison()
+    {
+        var left = ParseAddSub();
+        while (Check(TokenType.Less)   || Check(TokenType.Greater) ||
+               Check(TokenType.LessEq) || Check(TokenType.GreaterEq))
+        {
+            int    line  = Peek().Line;
+            string op    = Advance().Value;
+            var    right = ParseAddSub();
+            left = new BinaryExpr { Left = left, Op = op, Right = right, Line = line };
+        }
+        return left;
+    }
+
+    private Expression ParseAddSub()
+    {
+        var left = ParseMulDiv();
+        while (Check(TokenType.Plus) || Check(TokenType.Minus))
+        {
+            int    line  = Peek().Line;
+            string op    = Advance().Value;
+            var    right = ParseMulDiv();
+            left = new BinaryExpr { Left = left, Op = op, Right = right, Line = line };
+        }
+        return left;
+    }
+
+    private Expression ParseMulDiv()
+    {
+        var left = ParseUnary();
+        while (Check(TokenType.Star) || Check(TokenType.Slash) || Check(TokenType.Percent))
+        {
+            int    line  = Peek().Line;
+            string op    = Advance().Value;
+            var    right = ParseUnary();
+            left = new BinaryExpr { Left = left, Op = op, Right = right, Line = line };
+        }
+        return left;
+    }
+
+    private Expression ParseUnary()
+    {
+        if (Match(TokenType.Minus))
+        {
+            int line = Previous().Line;
+            return new UnaryExpr { Op = "-", Operand = ParseUnary(), Line = line };
+        }
+        if (Match(TokenType.Not))
+        {
+            int line = Previous().Line;
+            return new UnaryExpr { Op = "not", Operand = ParseUnary(), Line = line };
+        }
+        return ParsePrimary();
+    }
+
+    private Expression ParsePrimary()
+    {
+        int line = Peek().Line;
+
+        if (Check(TokenType.Number))
+            return new NumberLiteral { Value = long.Parse(Advance().Value), Line = line };
+
+        if (Check(TokenType.FloatNumber))
+            return new NumberLiteral { Value = (long)double.Parse(Advance().Value), Line = line };
+
+        // bool literals
+        if (Check(TokenType.BoolLiteral))
+        {
+            bool val = Advance().Value == "true";
+            return new BoolLiteral { Value = val, Line = line };
+        }
+
+        if (Match(TokenType.Null))
+            return new NumberLiteral { Value = 0, Line = line };
+
+        if (Check(TokenType.StringLiteral))
+            return new StringLiteralExpr { Value = Advance().Value, Line = line };
+
+        if (Match(TokenType.ParenthesisOpen))
+        {
+            var expr = ParseExpression();
+            Consume(TokenType.ParenthesisClose, "Expected ')'");
+            return expr;
+        }
+
+        if (Check(TokenType.Identifier))
+            return ParsePrimaryCall();
+
+        throw new Exception($"Expected expression at line {line}");
+    }
+
+    private Expression ParsePrimaryCall()
+    {
+        int    line = Peek().Line;
+        string name = Advance().Value;
+
+        if (Match(TokenType.ParenthesisOpen))
+        {
+            var args = new List<Expression>();
+            while (!Check(TokenType.ParenthesisClose) && !IsAtEnd())
+            {
+                args.Add(ParseExpression());
+                Match(TokenType.Comma);
+            }
+            Consume(TokenType.ParenthesisClose, "Expected ')'");
+            return new CallExpr { Name = name, Args = args, Line = line };
+        }
+
+        if (Match(TokenType.BracketOpen))
+        {
+            var index = ParseExpression();
+            Consume(TokenType.BracketClose, "Expected ']'");
+            return new ArrayAccess { Name = name, Index = index, Line = line };
+        }
+
+        return new VariableExpr { Name = name, Line = line };
+    }
+
+    // ================================================================= condition
+    // Conditions use ParseAddSub for sides so comparison operators are never
+    // consumed by the expression parser.
+    // Supports:
+    //   if x == 5:         normal comparison
+    //   if b:              boolean variable (no operator)
+    //   if not b:          negated boolean
+    private Condition ParseCondition()
+    {
+        int  line    = Peek().Line;
+        bool negated = Match(TokenType.Not);
+
+        var left = ParseAddSub();
+
+        // boolean condition — no comparison operator (e.g. "if b:")
+        if (Check(TokenType.Colon) || Check(TokenType.Newline) || IsAtEnd())
+        {
+            return new Condition
+            {
+                Left    = left,
+                Op      = "bool",
+                Right   = null,
+                Negated = negated,
+                Line    = line
+            };
+        }
+
+        string op    = ConsumeOperator();
+        var    right = ParseAddSub();
+
+        // optional: and / or chaining
+        if (Match(TokenType.And))
+        {
+            var    left2  = ParseAddSub();
+            string op2    = ConsumeOperator();
+            var    right2 = ParseAddSub();
+            return new Condition
+            {
+                Left    = left,
+                Op      = op + "&&" + op2,
+                Right   = right,
+                Negated = negated,
+                Line    = line
+            };
+        }
+
+        if (Match(TokenType.Or))
+        {
+            var    left2  = ParseAddSub();
+            string op2    = ConsumeOperator();
+            var    right2 = ParseAddSub();
+            return new Condition
+            {
+                Left    = left,
+                Op      = op + "||" + op2,
+                Right   = right,
+                Negated = negated,
+                Line    = line
+            };
+        }
+
+        return new Condition { Left = left, Op = op, Right = right, Negated = negated, Line = line };
+    }
+
+    private string ConsumeOperator()
+    {
+        if (Match(TokenType.DoubleEquals)) return "==";
+        if (Match(TokenType.NotEquals))    return "!=";
+        if (Match(TokenType.LessEq))       return "<=";
+        if (Match(TokenType.GreaterEq))    return ">=";
+        if (Match(TokenType.Less))         return "<";
+        if (Match(TokenType.Greater))      return ">";
+        throw new Exception($"Expected comparison operator at line {Peek().Line}");
+    }
+
+    // ---------------------------------------------------------------- lookaheads
     private bool IsFunctionDeclarationWithModifiers()
     {
         int saved = _cur;
         bool result = false;
-
         while (_cur < _tokens.Count &&
                (_tokens[_cur].Type is TokenType.Public or TokenType.Private
                                    or TokenType.Protected or TokenType.Static))
             _cur++;
-
         if (_cur < _tokens.Count &&
             (_tokens[_cur].Type == TokenType.Type || _tokens[_cur].Type == TokenType.Void))
         {
@@ -145,17 +378,14 @@ public class Parser
                     result = true;
             }
         }
-
         _cur = saved;
         return result;
     }
 
-    // Detects: TYPE|void NAME (|:   (no leading modifiers)
     private bool IsFunctionDeclaration()
     {
         int  saved  = _cur;
         bool result = false;
-
         if (_cur < _tokens.Count &&
             (_tokens[_cur].Type == TokenType.Type || _tokens[_cur].Type == TokenType.Void))
         {
@@ -169,7 +399,24 @@ public class Parser
                     result = true;
             }
         }
+        _cur = saved;
+        return result;
+    }
 
+    private bool IsArrayDeclaration()
+    {
+        int saved = _cur;
+        bool result = false;
+        if (_cur < _tokens.Count && _tokens[_cur].Type == TokenType.Type)
+        {
+            _cur++;
+            if (_cur < _tokens.Count && _tokens[_cur].Type == TokenType.BracketOpen)
+            {
+                _cur++;
+                if (_cur < _tokens.Count && _tokens[_cur].Type == TokenType.BracketClose)
+                    result = true;
+            }
+        }
         _cur = saved;
         return result;
     }
@@ -177,15 +424,17 @@ public class Parser
     // ------------------------------------------------------------------ import
     private ImportStatement ParseImport()
     {
+        int line = Previous().Line;
         string module = "";
         while (!Check(TokenType.Newline) && !IsAtEnd())
             module += Advance().Value;
-        return new ImportStatement { Module = module.Trim() };
+        return new ImportStatement { Module = module.Trim(), Line = line };
     }
 
     // ------------------------------------------------------------------ function
     private FunctionDeclaration ParseFunctionDeclaration()
     {
+        int    line   = Peek().Line;
         string access = "public";
         while (Check(TokenType.Public)    || Check(TokenType.Private) ||
                Check(TokenType.Protected) || Check(TokenType.Static))
@@ -199,7 +448,6 @@ public class Parser
         string name    = Consume(TokenType.Identifier, "Expected function name").Value;
 
         var parameters = new List<Parameter>();
-
         if (Match(TokenType.ParenthesisOpen))
         {
             while (!Check(TokenType.ParenthesisClose) && !IsAtEnd())
@@ -214,7 +462,6 @@ public class Parser
 
         Consume(TokenType.Colon, "Expected ':' after function signature");
         SkipNewlines();
-
         var body = ParseBlock();
         return new FunctionDeclaration
         {
@@ -222,50 +469,69 @@ public class Parser
             ReturnType = retType,
             Name       = name,
             Parameters = parameters,
-            Body       = body
+            Body       = body,
+            Line       = line
         };
     }
 
-    private FunctionCall ParseFunctionCallStatement(string name)
+    // ------------------------------------------------------------------ array declaration
+    private ArrayDeclaration ParseArrayDeclaration()
     {
-        Consume(TokenType.ParenthesisOpen, "Expected '('");
-        var args = new List<string>();
-        while (!Check(TokenType.ParenthesisClose) && !IsAtEnd())
-        {
-            args.Add(ConsumeValue());
-            Match(TokenType.Comma);
-        }
-        Consume(TokenType.ParenthesisClose, "Expected ')'");
-        return new FunctionCall { Name = name, Arguments = args };
+        int    line     = Peek().Line;
+        string elemType = Advance().Value;
+        Consume(TokenType.BracketOpen,  "Expected '['");
+        Consume(TokenType.BracketClose, "Expected ']'");
+        string name = Consume(TokenType.Identifier, "Expected array name").Value;
+        Consume(TokenType.Equals, "Expected '='");
+        Consume(TokenType.New,    "Expected 'new'");
+        Consume(TokenType.Type,   "Expected element type after new");
+        Consume(TokenType.BracketOpen,  "Expected '['");
+        var size = ParseExpression();
+        Consume(TokenType.BracketClose, "Expected ']'");
+        return new ArrayDeclaration { ElementType = elemType, Name = name, Size = size, Line = line };
+    }
+
+    // ------------------------------------------------------------------ var decl
+    private VariableDeclaration ParseVarDecl()
+    {
+        int    line = Previous().Line;
+        string type = Previous().Value;
+        string name = Consume(TokenType.Identifier, "Expected variable name").Value;
+
+        if (!Check(TokenType.Equals))
+            return new VariableDeclaration { Type = type, Name = name, Init = null, Line = line };
+
+        Advance();
+        var init = ParseExpression();
+        return new VariableDeclaration { Type = type, Name = name, Init = init, Line = line };
     }
 
     // ------------------------------------------------------------------ class
     private ClassDeclaration ParseClassDeclaration()
     {
+        int    line = Previous().Line;
         string name = Consume(TokenType.Identifier, "Expected class name").Value;
         string? baseClass = null;
-
         if (Check(TokenType.Less))
         {
             Advance();
-            baseClass = Consume(TokenType.Identifier, "Expected base class name").Value;
+            baseClass = Consume(TokenType.Identifier, "Expected base class").Value;
             Consume(TokenType.Greater, "Expected '>'");
         }
-
-        Consume(TokenType.Colon, "Expected ':' after class");
+        Consume(TokenType.Colon, "Expected ':' after class name");
         SkipNewlines();
         var body = ParseBlock();
-        return new ClassDeclaration { Name = name, BaseClass = baseClass, Body = body };
+        return new ClassDeclaration { Name = name, BaseClass = baseClass, Body = body, Line = line };
     }
 
     // ------------------------------------------------------------------ if
     private IfStatement ParseIf()
     {
+        int line = Previous().Line;
         var cond = ParseCondition();
         Consume(TokenType.Colon, "Expected ':' after if condition");
         SkipNewlines();
         var thenBranch = ParseBlock();
-
         var elseIfs    = new List<ElseIfClause>();
         var elseBranch = new List<Expression>();
 
@@ -296,49 +562,52 @@ public class Parser
             Condition  = cond,
             ThenBranch = thenBranch,
             ElseIfs    = elseIfs,
-            ElseBranch = elseBranch
+            ElseBranch = elseBranch,
+            Line       = line
         };
     }
 
     // ------------------------------------------------------------------ while
     private WhileStatement ParseWhile()
     {
+        int line = Previous().Line;
         var cond = ParseCondition();
         Consume(TokenType.Colon, "Expected ':' after while");
         SkipNewlines();
-        return new WhileStatement { Condition = cond, Body = ParseBlock() };
+        return new WhileStatement { Condition = cond, Body = ParseBlock(), Line = line };
     }
 
     // ------------------------------------------------------------------ for
     private ForStatement ParseFor()
     {
+        int    line    = Previous().Line;
         string varName = Consume(TokenType.Identifier, "Expected loop variable").Value;
         Consume(TokenType.Equals, "Expected '='");
-        string from = ConsumeValue();
+        var from = ParseExpression();
         Consume(TokenType.To, "Expected 'to'");
-        string to   = ConsumeValue();
-        string step = "1";
+        var to   = ParseExpression();
+        Expression step = new NumberLiteral { Value = 1 };
         if (Check(TokenType.Identifier) && Peek().Value == "step")
-        { Advance(); step = ConsumeValue(); }
+        { Advance(); step = ParseExpression(); }
         Consume(TokenType.Colon, "Expected ':'");
         SkipNewlines();
         return new ForStatement
         {
             VarName = varName, From = from, To = to,
-            Step    = step,    Body = ParseBlock()
+            Step    = step,    Body = ParseBlock(), Line = line
         };
     }
 
-    // ------------------------------------------------------------------ try/catch
+    // ------------------------------------------------------------------ try
     private TryStatement ParseTry()
     {
+        int line = Previous().Line;
         Consume(TokenType.Colon, "Expected ':' after try");
         SkipNewlines();
-        var tryBody = ParseBlock();
-
-        var     catchBody   = new List<Expression>();
-        var     finallyBody = new List<Expression>();
-        string? excVar      = null;
+        var tryBody     = ParseBlock();
+        var catchBody   = new List<Expression>();
+        var finallyBody = new List<Expression>();
+        string? excVar  = null;
 
         SkipNewlines();
         if (Match(TokenType.Catch))
@@ -363,46 +632,80 @@ public class Parser
 
         return new TryStatement
         {
-            TryBody      = tryBody,
-            CatchBody    = catchBody,
-            FinallyBody  = finallyBody,
-            ExceptionVar = excVar
+            TryBody = tryBody, CatchBody = catchBody,
+            FinallyBody = finallyBody, ExceptionVar = excVar, Line = line
         };
     }
 
     // ------------------------------------------------------------------ return
     private ReturnStatement ParseReturn()
     {
+        int line = Previous().Line;
         if (Check(TokenType.Newline) || IsAtEnd())
-            return new ReturnStatement { Value = null };
-        return new ReturnStatement { Value = ConsumeValue() };
+            return new ReturnStatement { Value = null, Line = line };
+        return new ReturnStatement { Value = ParseExpression(), Line = line };
     }
 
     // ------------------------------------------------------------------ print
     private PrintStatement ParsePrint()
     {
+        int line = Previous().Line;
+
         if (Check(TokenType.Identifier))
-            return new PrintStatement { VarName = Advance().Value };
+            return new PrintStatement { VarName = Advance().Value, Line = line };
 
-        string text = Consume(TokenType.StringLiteral, "Expected string or variable after print").Value;
+        string raw = Consume(TokenType.StringLiteral,
+            "Expected string literal or variable after print").Value;
 
-        var args = new List<string>();
-        for (int i = 0; i < text.Length; i++)
+        if (raw.Contains("${"))
+            return new PrintStatement { Segments = ParseInterpolation(raw), Line = line };
+
+        return new PrintStatement { Literal = raw, Line = line };
+    }
+
+    private List<PrintSegment> ParseInterpolation(string raw)
+    {
+        var segments = new List<PrintSegment>();
+        int i = 0;
+
+        while (i < raw.Length)
         {
-            if (text[i] == '{')
+            int start = raw.IndexOf("${", i);
+            if (start == -1)
             {
-                int end = text.IndexOf('}', i);
-                if (end != -1) args.Add(text.Substring(i + 1, end - i - 1));
+                if (i < raw.Length)
+                    segments.Add(new PrintSegment { Text = raw.Substring(i) });
+                break;
             }
+
+            if (start > i)
+                segments.Add(new PrintSegment { Text = raw.Substring(i, start - i) });
+
+            int end = raw.IndexOf('}', start + 2);
+            if (end == -1)
+                throw new Exception("Unterminated ${ in string interpolation");
+
+            string exprSrc = raw.Substring(start + 2, end - start - 2).Trim();
+            var exprTokens = new Cex.Lexer.Lexer(exprSrc).Tokenize();
+            var exprParser = new Parser(exprTokens);
+            segments.Add(new PrintSegment { Expr = exprParser.ParseExpression() });
+
+            i = end + 1;
         }
 
-        if (args.Count > 0) return new PrintStatement { Format = text, FormatArgs = args };
-        return new PrintStatement { Literal = text };
+        return segments;
     }
 
     // ------------------------------------------------------------------ input
-    private InputStatement ParseInput() =>
-        new() { VarName = Consume(TokenType.Identifier, "Expected variable name after input").Value };
+    private InputStatement ParseInput()
+    {
+        int line = Previous().Line;
+        return new InputStatement
+        {
+            VarName = Consume(TokenType.Identifier, "Expected variable name after input").Value,
+            Line    = line
+        };
+    }
 
     // ------------------------------------------------------------------ block
     private List<Expression> ParseBlock()
@@ -417,6 +720,7 @@ public class Parser
             var s = ParseStatement();
             if (s != null) stmts.Add(s);
         }
+
         Match(TokenType.Dedent);
         return stmts;
     }
@@ -424,11 +728,11 @@ public class Parser
     // ------------------------------------------------------------------ ASM
     private AsmBlock ParseAsm()
     {
+        int line = Previous().Line;
         Consume(TokenType.Colon, "Expected ':' after ASM");
         SkipNewlines();
-
         var lines = new List<string>();
-        if (!Match(TokenType.Indent)) return new AsmBlock { Lines = lines };
+        if (!Match(TokenType.Indent)) return new AsmBlock { Lines = lines, Line = line };
 
         while (!Check(TokenType.Dedent) && !IsAtEnd())
         {
@@ -440,89 +744,36 @@ public class Parser
             string raw = sb.ToString().Trim();
             if (raw.Length > 0) lines.Add(raw);
         }
+
         Match(TokenType.Dedent);
-        return new AsmBlock { Lines = lines };
+        return new AsmBlock { Lines = lines, Line = line };
     }
-
-    // ------------------------------------------------------------------ var
-    private VariableDeclaration ParseVarDecl()
-    {
-        string type = Previous().Value;
-        string name = Consume(TokenType.Identifier, "Expected variable name").Value;
-
-        if (!Check(TokenType.Equals))
-            return new VariableDeclaration { Type = type, Name = name, Value = null };
-
-        Advance(); // consume '='
-
-        if (Check(TokenType.StringLiteral))
-            return new VariableDeclaration { Type = type, Name = name, Value = $"\"{Advance().Value}\"" };
-        if (Check(TokenType.BoolLiteral))
-            return new VariableDeclaration { Type = type, Name = name, Value = Advance().Value == "true" ? "1" : "0" };
-        if (Match(TokenType.Null))
-            return new VariableDeclaration { Type = type, Name = name, Value = "0" };
-
-        return new VariableDeclaration { Type = type, Name = name, Value = ConsumeValue() };
-    }
-
-    private CheckpointStatement ParseCheckpoint() =>
-        new() { Name = Consume(TokenType.Identifier, "Expected checkpoint name").Value };
-
-    private GotoStatement ParseGoto() =>
-        new() { TargetName = Consume(TokenType.Identifier, "Expected checkpoint name").Value };
 
     // ================================================================= helpers
-    private Condition ParseCondition()
+    private CheckpointStatement ParseCheckpoint()
     {
-        bool   negated = Match(TokenType.Not);
-        string left    = ConsumeValue();
-        string op      = ConsumeOperator();
-        string right   = ConsumeValue();
-
-        if (Match(TokenType.And))
+        int line = Previous().Line;
+        return new CheckpointStatement
         {
-            string left2  = ConsumeValue();
-            string op2    = ConsumeOperator();
-            string right2 = ConsumeValue();
-            return new Condition { Left = left, Op = op + "&&" + op2, Right = right, Negated = negated };
-        }
-        if (Match(TokenType.Or))
-        {
-            string left2  = ConsumeValue();
-            string op2    = ConsumeOperator();
-            string right2 = ConsumeValue();
-            return new Condition { Left = left, Op = op + "||" + op2, Right = right, Negated = negated };
-        }
-
-        return new Condition { Left = left, Op = op, Right = right, Negated = negated };
+            Name = Consume(TokenType.Identifier, "Expected checkpoint name").Value,
+            Line = line
+        };
     }
 
-    private string ConsumeOperator()
+    private GotoStatement ParseGoto()
     {
-        if (Match(TokenType.DoubleEquals)) return "==";
-        if (Match(TokenType.NotEquals))    return "!=";
-        if (Match(TokenType.LessEq))       return "<=";
-        if (Match(TokenType.GreaterEq))    return ">=";
-        if (Match(TokenType.Less))         return "<";
-        if (Match(TokenType.Greater))      return ">";
-        throw new Exception($"Expected comparison operator at line {Peek().Line}");
-    }
-
-    private string ConsumeValue()
-    {
-        if (Check(TokenType.Number))        return Advance().Value;
-        if (Check(TokenType.FloatNumber))   return Advance().Value;
-        if (Check(TokenType.Identifier))    return Advance().Value;
-        if (Check(TokenType.BoolLiteral))   return Advance().Value == "true" ? "1" : "0";
-        if (Check(TokenType.StringLiteral)) return $"\"{Advance().Value}\"";
-        if (Check(TokenType.Null))          { Advance(); return "0"; }
-        throw new Exception($"Expected value at line {Peek().Line}");
+        int line = Previous().Line;
+        return new GotoStatement
+        {
+            TargetName = Consume(TokenType.Identifier, "Expected target name").Value,
+            Line       = line
+        };
     }
 
     private void SkipToNewline() { while (!IsAtEnd() && !Check(TokenType.Newline)) Advance(); }
     private void SkipNewlines()  { while (Check(TokenType.Newline)) Advance(); }
 
-    private bool  Match(params TokenType[] types)
+    private bool Match(params TokenType[] types)
     {
         foreach (var t in types) if (Check(t)) { Advance(); return true; }
         return false;

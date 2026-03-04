@@ -7,8 +7,4 @@
         <Nullable>enable</Nullable>
     </PropertyGroup>
 
-    <ItemGroup>
-      <None Remove="main.ce" />
-    </ItemGroup>
-
 </Project>
