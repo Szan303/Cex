@@ -4,24 +4,26 @@ public enum TokenType
 {
     // Keywords
     Import, Class, Extends,
-    Public, Private, Protected, Static, Void,
+    Public, Private, Protected, Static,
+    Void, Return,
     If, Else, ElseIf,
     While, For, To, Break, Continue,
     Print, Input,
     Checkpoint, Goto,
-    Return,
     ASM,
     True, False, Null,
+    Try, Catch, Finally,
+    And, Or, Not,
 
     // Types
-    Type,           // int, string, float, bool
+    Type,           // int, float, string, bool
 
     // Literals & names
     Identifier,
-    Number,         // integer: 42
-    FloatNumber,    // float:   3.14
+    Number,
+    FloatNumber,
     StringLiteral,
-    BoolLiteral,    // true / false
+    BoolLiteral,
 
     // Operators
     Equals,         // =
@@ -41,9 +43,7 @@ public enum TokenType
     Minus,          // -
     Star,           // *
     Slash,          // /
-    And,            // and
-    Or,             // or
-    Not,            // not
+    Percent,        // %
 
     // Punctuation
     Colon,
@@ -51,10 +51,10 @@ public enum TokenType
     Dot,
     ParenthesisOpen,
     ParenthesisClose,
-    BracketOpen,    // [
-    BracketClose,   // ]
-    BraceOpen,      // {
-    BraceClose,     // }
+    BracketOpen,
+    BracketClose,
+    BraceOpen,
+    BraceClose,
 
     // Layout
     Indent,
