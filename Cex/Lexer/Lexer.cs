@@ -53,7 +53,7 @@ public class Lexer
 
             if (c == ' ' || c == '\t') { _pos++; continue; }
 
-            // string literal — handle curly quotes
+            // string literal
             if (c == '"' || c == '\u201C' || c == '\u201D')
             {
                 tokens.Add(ReadString());
@@ -75,48 +75,49 @@ public class Lexer
             switch (c)
             {
                 case '=':
-                    if (Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.DoubleEquals,"=="));}
-                    else             {_pos++;  tokens.Add(T(TokenType.Equals,      "=" ));}
+                    if (Peek(1)=='='){_pos+=2;tokens.Add(T(TokenType.DoubleEquals,"=="));}
+                    else             {_pos++;  tokens.Add(T(TokenType.Equals,      "="));}
                     break;
                 case '!':
-                    if (Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.NotEquals,  "!="));}
+                    if (Peek(1)=='='){_pos+=2;tokens.Add(T(TokenType.NotEquals,"!="));}
                     else _pos++;
                     break;
                 case '<':
-                    if (Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.LessEq,     "<="));}
-                    else             {_pos++;  tokens.Add(T(TokenType.Less,        "<" ));}
+                    if (Peek(1)=='='){_pos+=2;tokens.Add(T(TokenType.LessEq,"<="));}
+                    else             {_pos++;  tokens.Add(T(TokenType.Less,"<"));}
                     break;
                 case '>':
-                    if (Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.GreaterEq,  ">="));}
-                    else             {_pos++;  tokens.Add(T(TokenType.Greater,     ">" ));}
+                    if (Peek(1)=='='){_pos+=2;tokens.Add(T(TokenType.GreaterEq,">="));}
+                    else             {_pos++;  tokens.Add(T(TokenType.Greater,">"));}
                     break;
                 case '+':
-                    if (Peek(1)=='+'){_pos+=2; tokens.Add(T(TokenType.PlusPlus,   "++"));}
-                    else if(Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.PlusEquals, "+="));}
-                    else             {_pos++;  tokens.Add(T(TokenType.Plus,        "+" ));}
+                    if (Peek(1)=='+')    {_pos+=2;tokens.Add(T(TokenType.PlusPlus,"++"));}
+                    else if(Peek(1)=='='){_pos+=2;tokens.Add(T(TokenType.PlusEquals,"+="));}
+                    else                 {_pos++;  tokens.Add(T(TokenType.Plus,"+"));}
                     break;
                 case '-':
-                    if (Peek(1)=='-'){_pos+=2; tokens.Add(T(TokenType.MinusMinus, "--"));}
-                    else if(Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.MinusEquals,"-="));}
-                    else             {_pos++;  tokens.Add(T(TokenType.Minus,       "-" ));}
+                    if (Peek(1)=='-')    {_pos+=2;tokens.Add(T(TokenType.MinusMinus,"--"));}
+                    else if(Peek(1)=='='){_pos+=2;tokens.Add(T(TokenType.MinusEquals,"-="));}
+                    else                 {_pos++;  tokens.Add(T(TokenType.Minus,"-"));}
                     break;
                 case '*':
-                    if (Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.StarEquals, "*="));}
-                    else             {_pos++;  tokens.Add(T(TokenType.Star,        "*" ));}
+                    if (Peek(1)=='='){_pos+=2;tokens.Add(T(TokenType.StarEquals,"*="));}
+                    else             {_pos++;  tokens.Add(T(TokenType.Star,"*"));}
                     break;
                 case '/':
-                    if (Peek(1)=='='){_pos+=2; tokens.Add(T(TokenType.SlashEquals,"/="));}
-                    else             {_pos++;  tokens.Add(T(TokenType.Slash,       "/" ));}
+                    if (Peek(1)=='='){_pos+=2;tokens.Add(T(TokenType.SlashEquals,"/="));}
+                    else             {_pos++;  tokens.Add(T(TokenType.Slash,"/"));}
                     break;
-                case ':': _pos++; tokens.Add(T(TokenType.Colon,           ":" )); break;
-                case ',': _pos++; tokens.Add(T(TokenType.Comma,           "," )); break;
-                case '.': _pos++; tokens.Add(T(TokenType.Dot,             "." )); break;
-                case '(': _pos++; tokens.Add(T(TokenType.ParenthesisOpen, "(" )); break;
-                case ')': _pos++; tokens.Add(T(TokenType.ParenthesisClose,")" )); break;
-                case '[': _pos++; tokens.Add(T(TokenType.BracketOpen,     "[" )); break;
-                case ']': _pos++; tokens.Add(T(TokenType.BracketClose,    "]" )); break;
-                case '{': _pos++; tokens.Add(T(TokenType.BraceOpen,       "{" )); break;
-                case '}': _pos++; tokens.Add(T(TokenType.BraceClose,      "}" )); break;
+                case '%': _pos++; tokens.Add(T(TokenType.Percent,        "%")); break;
+                case ':': _pos++; tokens.Add(T(TokenType.Colon,          ":")); break;
+                case ',': _pos++; tokens.Add(T(TokenType.Comma,          ",")); break;
+                case '.': _pos++; tokens.Add(T(TokenType.Dot,            ".")); break;
+                case '(': _pos++; tokens.Add(T(TokenType.ParenthesisOpen,"(")); break;
+                case ')': _pos++; tokens.Add(T(TokenType.ParenthesisClose,")")); break;
+                case '[': _pos++; tokens.Add(T(TokenType.BracketOpen,    "[")); break;
+                case ']': _pos++; tokens.Add(T(TokenType.BracketClose,   "]")); break;
+                case '{': _pos++; tokens.Add(T(TokenType.BraceOpen,      "{")); break;
+                case '}': _pos++; tokens.Add(T(TokenType.BraceClose,     "}")); break;
                 default:  _pos++; break;
             }
         }
@@ -208,7 +209,6 @@ public class Lexer
         return new Token(TokenType.StringLiteral, sb.ToString(), _line);
     }
 
-    // ----------------------------------------------------------------- helpers
     private char Peek(int offset = 1) =>
         _pos + offset < _src.Length ? _src[_pos + offset] : '\0';
 
@@ -224,6 +224,7 @@ public class Lexer
         "protected"  => T(TokenType.Protected,   w),
         "static"     => T(TokenType.Static,      w),
         "void"       => T(TokenType.Void,        w),
+        "return"     => T(TokenType.Return,      w),
         "if"         => T(TokenType.If,          w),
         "else"       => T(TokenType.Else,        w),
         "while"      => T(TokenType.While,       w),
@@ -233,7 +234,12 @@ public class Lexer
         "continue"   => T(TokenType.Continue,    w),
         "print"      => T(TokenType.Print,       w),
         "input"      => T(TokenType.Input,       w),
-        "return"     => T(TokenType.Return,      w),
+        "try"        => T(TokenType.Try,         w),
+        "catch"      => T(TokenType.Catch,       w),
+        "finally"    => T(TokenType.Finally,     w),
+        "and"        => T(TokenType.And,         w),
+        "or"         => T(TokenType.Or,          w),
+        "not"        => T(TokenType.Not,         w),
         "int"        => T(TokenType.Type,        w),
         "float"      => T(TokenType.Type,        w),
         "string"     => T(TokenType.Type,        w),
@@ -241,13 +247,9 @@ public class Lexer
         "true"       => T(TokenType.BoolLiteral, w),
         "false"      => T(TokenType.BoolLiteral, w),
         "null"       => T(TokenType.Null,        w),
-        "and"        => T(TokenType.And,         w),
-        "or"         => T(TokenType.Or,          w),
-        "not"        => T(TokenType.Not,         w),
         "ASM"        => T(TokenType.ASM,         w),
         "checkpoint" => T(TokenType.Checkpoint,  w),
         "goto"       => T(TokenType.Goto,        w),
-        "String[]"   => T(TokenType.Type,        w),
         _            => T(TokenType.Identifier,  w),
     };
 }

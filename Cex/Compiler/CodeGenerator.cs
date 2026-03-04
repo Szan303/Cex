@@ -11,33 +11,57 @@ public class CodeGenerator
     private int _strCount   = 0;
     private int _labelCount = 0;
 
-    private readonly StringBuilder _data = new();
-    private readonly StringBuilder _bss  = new();
-    private readonly StringBuilder _text = new();
-    private readonly StringBuilder _helpers = new();   // subroutines appended after main code
+    // these three are always independent — never swapped
+    private readonly StringBuilder _data    = new();
+    private readonly StringBuilder _bss     = new();
+    private readonly StringBuilder _helpers = new();
 
-    private readonly Dictionary<string, string> _strMap  = new();
-    private readonly Dictionary<string, string> _varType = new();
+    // _main   = start: entry code
+    // _fnText = current function body being built
+    // _text   = whichever is active (points to _main or _fnText)
+    private readonly StringBuilder _main = new();
+    private StringBuilder          _fnText = new();
+    private StringBuilder          _text;   // active target
 
+    private readonly Dictionary<string, string>              _strMap    = new();
+    private readonly Dictionary<string, string>              _varType   = new();
+    private readonly SymbolTable                             _symbols;
     private readonly Stack<(string breakLbl, string continueLbl)> _loopLabels = new();
 
-    private bool _convBufAdded   = false;
-    private bool _intToStrAdded  = false;
+    private string? _currentFuncRetLabel = null;
+
+    public CodeGenerator(SymbolTable symbols)
+    {
+        _symbols = symbols;
+        _text    = _main;   // default target is main entry code
+    }
 
     // ================================================================= public
-    public string Generate(List<Expression> expressions)
+    public string Generate(List<CompilationUnit> units)
     {
+        // 1. bss reservations
         _bss.AppendLine("written   resd 1");
         _bss.AppendLine("inputChar resb 256");
+        _bss.AppendLine("convBuf   resb 32");
 
-        ReserveVariables(expressions);
+        foreach (var unit in units)
+            ReserveVariables(unit.Expressions);
 
-        foreach (var e in expressions)
-            Emit(e);
+        // 2. emit __intToStr helper into _helpers unconditionally and first
+        EmitIntToStrHelper();
 
+        // 3. entry point in _main
+        _text = _main;
+        _text.AppendLine("    sub  rsp, 40");
+        _text.AppendLine("    call __fn_Main");
+        _text.AppendLine("    add  rsp, 40");
         EmitPause();
         _text.AppendLine("    mov  rcx, 0");
         _text.AppendLine("    call ExitProcess");
+
+        // 4. emit every function body into _helpers
+        foreach (var fn in _symbols.Functions.Values)
+            EmitFunctionBody(fn);
 
         return BuildOutput();
     }
@@ -47,23 +71,30 @@ public class CodeGenerator
     {
         switch (expr)
         {
-            case VariableDeclaration v:  EmitVarDecl(v);  break;
+            case FunctionDeclaration:    break;
+            case ImportStatement:        break;
+            case VariableDeclaration v:  EmitVarDecl(v);    break;
             case AssignmentStatement a:  EmitAssignment(a); break;
             case CheckpointStatement c:  _text.AppendLine($"{c.Name}:"); break;
             case GotoStatement g:        _text.AppendLine($"    jmp {g.TargetName}"); break;
-            case PrintStatement p:       EmitPrint(p);    break;
-            case InputStatement i:       EmitInput(i);    break;
-            case IfStatement i:          EmitIf(i);       break;
-            case WhileStatement w:       EmitWhile(w);    break;
-            case ForStatement f:         EmitFor(f);      break;
-            case BreakStatement:         EmitBreak();     break;
-            case ContinueStatement:      EmitContinue();  break;
+            case PrintStatement p:       EmitPrint(p);      break;
+            case InputStatement i:       EmitInput(i);      break;
+            case IfStatement i:          EmitIf(i);         break;
+            case WhileStatement w:       EmitWhile(w);      break;
+            case ForStatement f:         EmitFor(f);        break;
+            case BreakStatement:         EmitBreak();       break;
+            case ContinueStatement:      EmitContinue();    break;
+            case ReturnStatement r:      EmitReturn(r);     break;
+            case TryStatement t:         EmitTry(t);        break;
+            case FunctionCall fc:        EmitFunctionCall(fc, "rax"); break;
             case AsmBlock a:
                 foreach (var line in a.Lines)
                     _text.AppendLine($"    {line}");
                 break;
             case ClassDeclaration cls:
-                foreach (var e in cls.Body) Emit(e);
+                foreach (var e in cls.Body)
+                    if (e is not FunctionDeclaration)
+                        Emit(e);
                 break;
         }
     }
@@ -83,7 +114,7 @@ public class CodeGenerator
         }
         else
         {
-            _text.AppendLine($"    mov qword [rel {v.Name}], {v.Value}");
+            _text.AppendLine($"    mov  qword [rel {v.Name}], {v.Value}");
         }
     }
 
@@ -106,7 +137,7 @@ public class CodeGenerator
             }
             else
             {
-                EmitIntToStr(p.VarName);
+                EmitPrintInt(p.VarName);
             }
         }
         else if (p.Format != null)
@@ -132,14 +163,14 @@ public class CodeGenerator
         _text.AppendLine("    call ReadConsoleA");
         _text.AppendLine("    add  rsp, 40");
 
-        if (type == "int" || type == "float")
+        if (type is "int" or "float")
         {
             EmitStrToInt();
             _text.AppendLine($"    mov  [rel {inp.VarName}], rax");
         }
         else
         {
-            _text.AppendLine($"    lea  rax, [rel inputChar]");
+            _text.AppendLine("    lea  rax, [rel inputChar]");
             _text.AppendLine($"    mov  [rel {inp.VarName}], rax");
         }
     }
@@ -188,13 +219,11 @@ public class CodeGenerator
         string lblEnd   = $"__endwhile_{id}";
 
         _loopLabels.Push((lblEnd, lblStart));
-
         _text.AppendLine($"{lblStart}:");
         EmitConditionJump(w.Condition, lblEnd);
         foreach (var e in w.Body) Emit(e);
         _text.AppendLine($"    jmp {lblStart}");
         _text.AppendLine($"{lblEnd}:");
-
         _loopLabels.Pop();
     }
 
@@ -206,13 +235,12 @@ public class CodeGenerator
         string lblContinue = $"__forcont_{id}";
         string lblEnd      = $"__endfor_{id}";
 
-        // initialise loop variable
         if (long.TryParse(f.From, out long fromVal))
-            _text.AppendLine($"    mov qword [rel {f.VarName}], {fromVal}");
+            _text.AppendLine($"    mov  qword [rel {f.VarName}], {fromVal}");
         else
         {
-            _text.AppendLine($"    mov rax, [rel {f.From}]");
-            _text.AppendLine($"    mov [rel {f.VarName}], rax");
+            _text.AppendLine($"    mov  rax, [rel {f.From}]");
+            _text.AppendLine($"    mov  [rel {f.VarName}], rax");
         }
 
         _loopLabels.Push((lblEnd, lblContinue));
@@ -226,7 +254,6 @@ public class CodeGenerator
             _text.AppendLine($"    cmp  rax, [rel {f.To}]");
 
         _text.AppendLine($"    jge  {lblEnd}");
-
         foreach (var e in f.Body) Emit(e);
 
         _text.AppendLine($"{lblContinue}:");
@@ -244,15 +271,154 @@ public class CodeGenerator
         _loopLabels.Pop();
     }
 
+    // ------------------------------------------------------------------ try
+    private void EmitTry(TryStatement t)
+    {
+        int    id         = _labelCount++;
+        string lblFinally = $"__finally_{id}";
+        string lblCatch   = $"__catch_{id}";
+
+        foreach (var e in t.TryBody) Emit(e);
+        _text.AppendLine($"    jmp {lblFinally}");
+        _text.AppendLine($"{lblCatch}:");
+        foreach (var e in t.CatchBody) Emit(e);
+        _text.AppendLine($"{lblFinally}:");
+        foreach (var e in t.FinallyBody) Emit(e);
+    }
+
+    // ---------------------------------------------------------------- functions
+    private void EmitFunctionBody(FunctionDeclaration fn)
+    {
+        string retLabel = $"__ret_{fn.Name}";
+        _currentFuncRetLabel = retLabel;
+
+        // all function code goes into _helpers
+        _text = _helpers;
+
+        _text.AppendLine($"; ---- {fn.Access} {fn.ReturnType} {fn.Name} ----");
+        _text.AppendLine($"__fn_{fn.Name}:");
+        _text.AppendLine("    push rbp");
+        _text.AppendLine("    mov  rbp, rsp");
+
+        string[] paramRegs = { "rcx", "rdx", "r8", "r9" };
+        for (int i = 0; i < fn.Parameters.Count && i < 4; i++)
+        {
+            _text.AppendLine($"    mov  [rel {fn.Parameters[i].Name}], {paramRegs[i]}");
+            _varType[fn.Parameters[i].Name] = fn.Parameters[i].Type;
+        }
+
+        foreach (var e in fn.Body) Emit(e);
+
+        _text.AppendLine($"{retLabel}:");
+        _text.AppendLine("    pop  rbp");
+        _text.AppendLine("    ret");
+        _text.AppendLine();
+
+        // restore to main (though after all fns this doesn't matter)
+        _text = _main;
+        _currentFuncRetLabel = null;
+    }
+
+    private void EmitFunctionCall(FunctionCall fc, string resultReg)
+    {
+        if (EmitStdLibCall(fc, resultReg)) return;
+
+        if (!_symbols.FunctionExists(fc.Name))
+            throw new Exception($"Call to undefined function '{fc.Name}'");
+
+        string[] paramRegs = { "rcx", "rdx", "r8", "r9" };
+        for (int i = 0; i < fc.Arguments.Count && i < 4; i++)
+            LoadValue(fc.Arguments[i], paramRegs[i]);
+
+        _text.AppendLine("    sub  rsp, 40");
+        _text.AppendLine($"    call __fn_{fc.Name}");
+        _text.AppendLine("    add  rsp, 40");
+
+        if (resultReg != "rax")
+            _text.AppendLine($"    mov  {resultReg}, rax");
+    }
+
+    // ------------------------------------------------------------------ stdlib
+    private bool EmitStdLibCall(FunctionCall fc, string resultReg)
+    {
+        switch (fc.Name)
+        {
+            case "math_abs":
+            {
+                int id = _labelCount++;
+                LoadValue(fc.Arguments[0], "rax");
+                _text.AppendLine("    test rax, rax");
+                _text.AppendLine($"    jns  __abs_pos_{id}");
+                _text.AppendLine("    neg  rax");
+                _text.AppendLine($"__abs_pos_{id}:");
+                if (resultReg != "rax") _text.AppendLine($"    mov  {resultReg}, rax");
+                return true;
+            }
+            case "math_max":
+            {
+                int id = _labelCount++;
+                LoadValue(fc.Arguments[0], "rax");
+                LoadValue(fc.Arguments[1], "rbx");
+                _text.AppendLine("    cmp  rax, rbx");
+                _text.AppendLine($"    jge  __max_done_{id}");
+                _text.AppendLine("    mov  rax, rbx");
+                _text.AppendLine($"__max_done_{id}:");
+                if (resultReg != "rax") _text.AppendLine($"    mov  {resultReg}, rax");
+                return true;
+            }
+            case "math_min":
+            {
+                int id = _labelCount++;
+                LoadValue(fc.Arguments[0], "rax");
+                LoadValue(fc.Arguments[1], "rbx");
+                _text.AppendLine("    cmp  rax, rbx");
+                _text.AppendLine($"    jle  __min_done_{id}");
+                _text.AppendLine("    mov  rax, rbx");
+                _text.AppendLine($"__min_done_{id}:");
+                if (resultReg != "rax") _text.AppendLine($"    mov  {resultReg}, rax");
+                return true;
+            }
+            case "str_len":
+            {
+                int sid = _labelCount++;
+                _text.AppendLine($"    mov  rsi, [rel {fc.Arguments[0]}]");
+                _text.AppendLine("    xor  ecx, ecx");
+                _text.AppendLine($"__strlen_loop_{sid}:");
+                _text.AppendLine("    cmp  byte [rsi+rcx], 0");
+                _text.AppendLine($"    je   __strlen_done_{sid}");
+                _text.AppendLine("    inc  ecx");
+                _text.AppendLine($"    jmp  __strlen_loop_{sid}");
+                _text.AppendLine($"__strlen_done_{sid}:");
+                _text.AppendLine("    mov  rax, rcx");
+                if (resultReg != "rax") _text.AppendLine($"    mov  {resultReg}, rax");
+                return true;
+            }
+            default: return false;
+        }
+    }
+
+    // ------------------------------------------------------------------ return
+    private void EmitReturn(ReturnStatement r)
+    {
+        if (r.Value != null) LoadValue(r.Value, "rax");
+        if (_currentFuncRetLabel != null)
+            _text.AppendLine($"    jmp {_currentFuncRetLabel}");
+        else
+        {
+            _text.AppendLine("    mov  rcx, 0");
+            _text.AppendLine("    call ExitProcess");
+        }
+    }
+
     private void EmitBreak()
     {
-        if (_loopLabels.Count == 0) throw new Exception("break used outside of a loop");
+        if (_loopLabels.Count == 0) throw new Exception("break outside loop");
         _text.AppendLine($"    jmp {_loopLabels.Peek().breakLbl}");
     }
 
     private void EmitContinue()
     {
-        if (_loopLabels.Count == 0) throw new Exception("continue used outside of a loop");
+        if (_loopLabels.Count == 0) throw new Exception("continue outside loop");
         _text.AppendLine($"    jmp {_loopLabels.Peek().continueLbl}");
     }
 
@@ -266,29 +432,22 @@ public class CodeGenerator
                 _text.AppendLine("    inc  rax");
                 _text.AppendLine($"    mov  [rel {a.VarName}], rax");
                 break;
-
             case "--":
                 _text.AppendLine($"    mov  rax, [rel {a.VarName}]");
                 _text.AppendLine("    dec  rax");
                 _text.AppendLine($"    mov  [rel {a.VarName}], rax");
                 break;
-
             case "=":
                 LoadValue(a.Left ?? a.Operand!, "rax");
-                if (a.RhsOp != null)
-                {
-                    LoadValue(a.Operand!, "rbx");
-                    EmitArith(a.RhsOp);
-                }
+                if (a.RhsOp != null) { LoadValue(a.Operand!, "rbx"); EmitArith(a.RhsOp); }
                 _text.AppendLine($"    mov  [rel {a.VarName}], rax");
                 break;
-
-            default: // += -= *= /=
+            default:
                 _text.AppendLine($"    mov  rax, [rel {a.VarName}]");
                 LoadValue(a.Operand!, "rbx");
                 EmitArith(a.Operator.TrimEnd('=') switch
                 {
-                    "+" => "+", "-" => "-", "*" => "*", "/" => "/",
+                    "+" => "+", "-" => "-", "*" => "*", "/" => "/", "%" => "%",
                     _   => throw new Exception($"Unknown operator: {a.Operator}")
                 });
                 _text.AppendLine($"    mov  [rel {a.VarName}], rax");
@@ -299,10 +458,10 @@ public class CodeGenerator
     // ------------------------------------------------------------------ pause
     private void EmitPause()
     {
-        string label = GetOrAddString("Press Enter to exit...", newline: true);
-        int    len   = Encoding.ASCII.GetByteCount("Press Enter to exit...") + 1;
+        const string pauseText = "Press Enter to exit...";
+        string label = GetOrAddString(pauseText, newline: true);
+        int    len   = Encoding.ASCII.GetByteCount(pauseText) + 1;
 
-        _text.AppendLine("    ; --- pause ---");
         EmitWriteConsole(label, len);
 
         _text.AppendLine("    sub  rsp, 40");
@@ -317,9 +476,7 @@ public class CodeGenerator
         _text.AppendLine("    add  rsp, 40");
     }
 
-    // ================================================================= helpers
-
-    // WriteConsoleA with known label + byte length
+    // ================================================================= write helpers
     private void EmitWriteConsole(string label, int len)
     {
         _text.AppendLine("    sub  rsp, 40");
@@ -334,7 +491,6 @@ public class CodeGenerator
         _text.AppendLine("    add  rsp, 40");
     }
 
-    // WriteConsoleA when rdx already contains the string pointer — uses inline strlen
     private void EmitWriteConsoleRdx()
     {
         int id = _labelCount++;
@@ -358,13 +514,12 @@ public class CodeGenerator
         _text.AppendLine("    add  rsp, 40");
     }
 
-    // convert integer variable to string and print it
-    private void EmitIntToStr(string varName)
+    // print integer variable — calls __intToStr then WriteConsoleA
+    private void EmitPrintInt(string varName)
     {
-        EnsureConvBuf();
         _text.AppendLine($"    mov  rax, [rel {varName}]");
         _text.AppendLine("    call __intToStr");
-        // __intToStr leaves: rdx = ptr to string, rcx = length
+        // __intToStr returns: rdx = ptr, ecx = length
         _text.AppendLine("    mov  r8d, ecx");
         _text.AppendLine("    sub  rsp, 40");
         _text.AppendLine("    mov  rsi, rdx");
@@ -378,70 +533,68 @@ public class CodeGenerator
         _text.AppendLine("    add  rsp, 40");
     }
 
-    private void EnsureConvBuf()
+    // emit __intToStr subroutine into _helpers — called once at start of Generate()
+    private void EmitIntToStrHelper()
     {
-        if (!_convBufAdded)
-        {
-            _bss.AppendLine("convBuf resb 32");
-            _convBufAdded = true;
-        }
-        EnsureIntToStrHelper();
-    }
-
-    // emit __intToStr subroutine once into _helpers
-    private void EnsureIntToStrHelper()
-    {
-        if (_intToStrAdded) return;
-        _intToStrAdded = true;
-
         _helpers.AppendLine("""
-; ---- __intToStr: rax = int64 in, rdx = string ptr out, ecx = length out ----
-__intToStr:
-    push rbx
-    push rdi
-    push rsi
-    lea  rdi, [rel convBuf]
-    ; point rsi to end of buffer
-    lea  rsi, [rel convBuf]
-    add  rsi, 31
-    mov  byte [rsi], 0xA       ; newline at end
-    dec  rsi
-    ; handle negative
-    test rax, rax
-    jns  __its_pos
-    neg  rax
-    mov  byte [rdi], '-'
-    inc  rdi
-__its_pos:
-    mov  rbx, 10
-__its_digit:
-    xor  rdx, rdx
-    div  rbx
-    add  dl, '0'
-    mov  [rsi], dl
-    dec  rsi
-    test rax, rax
-    jnz  __its_digit
-    inc  rsi
-    ; rdx = pointer to first digit, ecx = length
-    mov  rdx, rsi
-    lea  rcx, [rel convBuf]
-    add  rcx, 32               ; one past end (including newline)
-    sub  rcx, rsi
-    ; if negative, adjust pointer to include '-'
-    cmp  byte [rdi-1], '-'
-    jne  __its_done
-    dec  rdx
-    inc  ecx
-__its_done:
-    pop  rsi
-    pop  rdi
-    pop  rbx
-    ret
-""");
+                            ; ================================================================= __intToStr
+                            ; in:  rax = int64
+                            ; out: rdx = pointer to ASCII string, ecx = length (includes newline)
+                            __intToStr:
+                                push rbx
+                                push rdi
+                                push rsi
+
+                                ; rsi = write cursor starting at end of buffer
+                                lea  rsi, [rel convBuf]
+                                add  rsi, 29             ; point to last usable byte (leave room for \n)
+
+                                ; store newline AFTER the number
+                                mov  byte [rsi+1], 0xA
+                                mov  byte [rsi+2], 0
+
+                                ; is number negative?
+                                xor  rdi, rdi            ; rdi = 0 means positive, 1 means negative
+                                test rax, rax
+                                jns  __its_pos
+                                neg  rax
+                                mov  rdi, 1              ; flag negative
+                            __its_pos:
+                                mov  rbx, 10
+                            __its_digit:
+                                xor  rdx, rdx
+                                div  rbx                 ; rax = quotient, rdx = remainder
+                                add  dl, '0'
+                                mov  [rsi], dl           ; write digit
+                                dec  rsi
+                                test rax, rax
+                                jnz  __its_digit
+
+                                ; if negative, write '-'
+                                test rdi, rdi
+                                jz   __its_no_minus
+                                mov  byte [rsi], '-'
+                                dec  rsi
+                            __its_no_minus:
+                                inc  rsi                 ; rsi now points to first character
+
+                                ; rdx = start of string
+                                mov  rdx, rsi
+
+                                ; ecx = length including newline
+                                lea  rcx, [rel convBuf]
+                                add  rcx, 31             ; points to the 0xA byte
+                                sub  rcx, rsi
+                                inc  ecx                 ; include the newline itself
+
+                                pop  rsi
+                                pop  rdi
+                                pop  rbx
+                                ret
+                            ; =================================================================
+                            """);
     }
 
-    // inline strToInt: reads inputChar buffer, result in rax
     private void EmitStrToInt()
     {
         int id = _labelCount++;
@@ -462,13 +615,10 @@ __its_done:
         _text.AppendLine($"__stoi_done_{id}:");
     }
 
-    // format print: "hello {x} world"
     private void EmitFormatPrint(string fmt, List<string> args)
     {
-        string pattern = @"\{(\w+)\}";
         int last = 0;
-
-        foreach (Match m in Regex.Matches(fmt, pattern))
+        foreach (Match m in Regex.Matches(fmt, @"\{(\w+)\}"))
         {
             string before = fmt.Substring(last, m.Index - last);
             if (before.Length > 0)
@@ -486,7 +636,7 @@ __its_done:
             }
             else
             {
-                EmitIntToStr(varN);
+                EmitPrintInt(varN);
             }
 
             last = m.Index + m.Length;
@@ -500,7 +650,6 @@ __its_done:
         }
     }
 
-    // emit cmp + conditional jump to falseLabel when condition is false
     private void EmitConditionJump(Condition c, string falseLabel)
     {
         LoadValue(c.Left, "rax");
@@ -510,16 +659,26 @@ __its_done:
         else
             _text.AppendLine($"    cmp  rax, [rel {c.Right}]");
 
-        string j = c.Op switch
+        string baseOp = c.Op.Contains("&&") ? c.Op.Split("&&")[0]
+                      : c.Op.Contains("||") ? c.Op.Split("||")[0]
+                      : c.Op;
+
+        string j = baseOp switch
         {
-            "==" => "jne",
-            "!=" => "je",
-            "<"  => "jge",
-            ">"  => "jle",
-            "<=" => "jg",
-            ">=" => "jl",
-            _    => throw new Exception($"Unknown operator: {c.Op}")
+            "==" => "jne", "!=" => "je",
+            "<"  => "jge", ">"  => "jle",
+            "<=" => "jg",  ">=" => "jl",
+            _    => throw new Exception($"Unknown op: {baseOp}")
         };
+
+        if (c.Negated) j = j switch
+        {
+            "jne" => "je",  "je"  => "jne",
+            "jge" => "jl",  "jl"  => "jge",
+            "jle" => "jg",  "jg"  => "jle",
+            _     => j
+        };
+
         _text.AppendLine($"    {j}  {falseLabel}");
     }
 
@@ -538,6 +697,11 @@ __its_done:
             case "+": _text.AppendLine("    add  rax, rbx"); break;
             case "-": _text.AppendLine("    sub  rax, rbx"); break;
             case "*": _text.AppendLine("    imul rax, rbx"); break;
+            case "%":
+                _text.AppendLine("    cqo");
+                _text.AppendLine("    idiv rbx");
+                _text.AppendLine("    mov  rax, rdx");
+                break;
             case "/":
                 _text.AppendLine("    cqo");
                 _text.AppendLine("    idiv rbx");
@@ -545,38 +709,59 @@ __its_done:
         }
     }
 
+    // ---------------------------------------------------------------- reserve
     private void ReserveVariables(List<Expression> exprs)
     {
         foreach (var e in exprs)
         {
-            if (e is VariableDeclaration v)
+            switch (e)
             {
-                _bss.AppendLine($"{v.Name}: resq 1");
-                _varType[v.Name] = v.Type;
-            }
-            else if (e is ClassDeclaration cls) ReserveVariables(cls.Body);
-            else if (e is IfStatement i)
-            {
-                ReserveVariables(i.ThenBranch);
-                foreach (var ei in i.ElseIfs) ReserveVariables(ei.Body);
-                ReserveVariables(i.ElseBranch);
-            }
-            else if (e is WhileStatement w) ReserveVariables(w.Body);
-            else if (e is ForStatement f)
-            {
-                _bss.AppendLine($"{f.VarName}: resq 1");
-                ReserveVariables(f.Body);
+                case VariableDeclaration v:
+                    _bss.AppendLine($"{v.Name}: resq 1");
+                    _varType[v.Name] = v.Type;
+                    break;
+                case FunctionDeclaration fn:
+                    foreach (var p in fn.Parameters)
+                    {
+                        _bss.AppendLine($"{p.Name}: resq 1");
+                        _varType[p.Name] = p.Type;
+                    }
+                    ReserveVariables(fn.Body);
+                    break;
+                case ClassDeclaration cls:
+                    ReserveVariables(cls.Body);
+                    break;
+                case IfStatement i:
+                    ReserveVariables(i.ThenBranch);
+                    foreach (var ei in i.ElseIfs) ReserveVariables(ei.Body);
+                    ReserveVariables(i.ElseBranch);
+                    break;
+                case WhileStatement w:
+                    ReserveVariables(w.Body);
+                    break;
+                case ForStatement f:
+                    _bss.AppendLine($"{f.VarName}: resq 1");
+                    ReserveVariables(f.Body);
+                    break;
+                case TryStatement t:
+                    ReserveVariables(t.TryBody);
+                    ReserveVariables(t.CatchBody);
+                    ReserveVariables(t.FinallyBody);
+                    break;
             }
         }
     }
 
+    // ---------------------------------------------------------------- strings
     private string GetOrAddString(string text, bool newline)
     {
-        string key = text + (newline ? "\\n" : "");
+        string key = text + (newline ? "\n" : "");
         if (_strMap.TryGetValue(key, out string? existing)) return existing;
+
         _strCount++;
         string label   = $"msg{_strCount}";
-        string escaped = text.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        string escaped = text.Replace("\\n", "\",0xA,\"")
+                             .Replace("\\t", "\",0x9,\"");
         _data.AppendLine(newline
             ? $"{label}: db \"{escaped}\",0xA,0"
             : $"{label}: db \"{escaped}\",0");
@@ -584,6 +769,7 @@ __its_done:
         return label;
     }
 
+    // ---------------------------------------------------------------- output
     private string BuildOutput()
     {
         var sb = new StringBuilder();
@@ -602,10 +788,9 @@ __its_done:
         sb.AppendLine("section .text");
         sb.AppendLine("global start");
         sb.AppendLine("start:");
-        sb.Append(_text);
-        // helpers (subroutines) go after main code flow
+        sb.Append(_main);      // entry point code
         sb.AppendLine();
-        sb.Append(_helpers);
+        sb.Append(_helpers);   // __intToStr + all function bodies
         return sb.ToString();
     }
 }
