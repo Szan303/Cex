@@ -1,275 +1,293 @@
-# C! — Language & Compiler Documentation
+# C! Compiler — Documentation
 
-C! is a simple high-level language that combines Python-like syntax with low-level control and inline assembly. It is an experimental educational language and compiler that compiles C!-source (.ce) to NASM assembly and links to a Windows executable.
+This README documents the current C! compiler: how to use it, language features (expressions, return expressions, arrays, nested calls, string interpolation), tooling/CLI, and migration notes for the updated parser/lexer/codegen.
 
-This documentation covers:
-- language overview and goals
-- syntax and examples
-- supported features and limitations
-- how to build/compile programs with the current compiler
-- architecture notes and important implementation details
-- how to extend the compiler and debugging tips
+Contents
+- Overview
+- Quick start (build & run)
+- CLI and project layout
+- Language reference
+  - Files & multi-file projects
+  - Lexical notes
+  - Expressions (Pratt-style)
+  - Functions & return expressions
+  - Local variables & stack allocation
+  - Arrays (heap-allocated)
+  - Function calls and nested calls
+  - Strings, interpolation and concatenation
+  - Classes & access modifiers (public/protected/private)
+  - Standard library (import System)
+- Examples
+- Migration notes (from previous compiler versions)
+- Debugging & common errors
+- Limitations & roadmap
 
 ---
 
-## Quick example
+## Overview
 
-main.ce
-```c!
-import System
+This C! compiler reads `.ce` source files under a project directory, parses them into an AST, validates calls and access modifiers, and emits a single assembly file which is assembled and linked into an executable. The compiler now includes:
 
+- Full expression support (operator precedence, unary ops, boolean operators)
+- Return expressions (any expression can be returned)
+- Arrays with `new` syntax (heap-allocated, simple arena allocator)
+- Nested and recursive function calls (argument evaluation and calling conventions)
+- String interpolation using `${...}` inside string literals and string concatenation (`+`)
+- Local variables allocated in function stack frames
+
+---
+
+## Quick start (build & run)
+
+1. Build the compiler (your existing .NET / dotnet or IDE configuration).
+2. Place your project in a folder (see "Project layout" below).
+3. Run the compiler and pass the project's folder path:
+
+```
+Cex.exe C:\path\to\YourProject
+```
+
+If no path is passed, the default project root constant in `Program.cs` is used.
+
+The compiler will:
+- Scan `.ce` files recursively in the project folder
+- Parse and validate them
+- Emit `output.asm` to the project folder
+- Assemble (NASM) and link (gcc/mingw) into `ProjectName.exe`
+
+Paths to NASM and GCC are determined relative to the compiler binary; see `Program.cs` for configuration.
+
+---
+
+## CLI and project layout
+
+Recommended project layout:
+
+```
+MyGame/
+├── main.ce
+├── math.ce
+├── strings.ce
+└── models/
+    └── player.ce
+```
+
+Usage:
+
+- Build the compiler and place NASM/GCC toolchains where `Program.cs` expects them, or adjust paths in `Program.cs`.
+- Run: `Cex.exe <path-to-project-folder>`
+
+Output: `output.asm`, `output.obj`, and `ProjectName.exe` are produced in the project folder.
+
+---
+
+## Language reference
+
+This section summarizes syntax and semantics.
+
+### Files & multi-file projects
+- All `.ce` files under the project root are parsed and compiled together.
+- Functions and classes declared in any file are available across the project (subject to access modifiers).
+- Imports like `import System` enable stdlib functions; you do not need to `import` your own project files (the compiler finds them automatically).
+
+### Lexical notes
+- Indentation-based block structure (like Python).
+- Strings are double-quoted.
+- Identifiers: letters, digits, underscores; must not start with digits.
+- New tokens:
+  - `new` for array allocation
+  - `[` and `]` for array indexing
+  - `%=` (mod-assign) supported
+- Comments: `//` to end of line.
+
+### Expressions
+- Full expression support with operator precedence and associativity:
+  - Unary: `-`, `not`
+  - Binary arithmetic: `* / %`, then `+ -`
+  - Comparison: `< <= > >= == !=`
+  - Boolean: `and` (`&&`), `or` (`||`)
+- Parentheses allowed: `(a + b) * c`
+- Expression nodes evaluate to `int` (for now) or `string` where appropriate.
+
+Examples:
+```
+int a = (x + 2) * y
+int ok = (x > 0) and (y < 10)
+```
+
+### Functions & return expressions
+- Function declaration:
+```
+public static int Add(int x, int y):
+    return x + y
+```
+- Any expression can be returned:
+```
+return (a + b) * 2
+```
+- Functions may be top-level or methods inside classes. Methods inside classes are registered with owner class info for access control.
+
+### Local variables & stack allocation
+- Local variables are created with `int`, `string`, etc. inside functions; they are allocated in the function's stack frame:
+```
+int x = 10
+```
+- The compiler computes a stack frame large enough for the function's locals (aligned to 16 bytes). Locals live in `[rbp - offset]`.
+
+### Arrays
+- Arrays are created with `new` and are heap-allocated via a simple arena allocator:
+```
+int[] arr = new int[10]
+arr[0] = 5
+int v = arr[1]
+```
+- The compiler stores an array pointer in a variable; elements are 8-byte integers.
+- The allocator is a bump allocator (arena) exposed via internal helper labels (`__heap_alloc`, `__heap_reset`). This is currently simple and not GC’d.
+
+### Nested function calls
+- Arguments are evaluated and passed to the first four integer parameters using `rcx`, `rdx`, `r8`, `r9` (Win64 calling convention). Additional support for >4 args via stack can be added later.
+- Nested and recursive calls are supported:
+```
+int z = Add(Mul(x, 2), y)
+```
+
+### Strings, interpolation and concatenation
+- Strings: `"Hello world"`
+- Interpolation: use `${expression}` inside a string literal. Example:
+```
+print "x=${x} result=${Add(x, 2)}"
+```
+- The compiler parses `${...}` as a mini-expression using the same expression parser, so any expression is allowed inside.
+- Concatenation: `+` between strings or string variables performs allocation on the heap and concatenates both sides:
+```
+string s = "Hello" + " World"
+```
+- `print` behavior:
+  - `print "hello"` — literal with newline
+  - `print varName` — prints a variable (string or converted int)
+  - `print "x=${x}"` — prints interpolation
+- To include literal `${` or `$` or `{` in a string, escape or use `\{` or `\$` sequences in the source — the lexer handles escapes.
+
+### Classes & access modifiers
+- Class declaration:
+```
 class Program:
-    public static void Main:
-
-        checkpoint a
-        print "hello world!"
-        int x = 1
-
-        if x == 20:
-            print "x equals 20"
-        else:
-            print "nuh uh"
-            x = x + 1
-            goto a
+    private static int Add(int x):
+        return x + 1
 ```
+- Methods are registered with their owner class. Access modifiers:
+  - `public`: callable from anywhere.
+  - `protected` / `private`: callable only from within the owning class (and protected could later be extended for subclasses).
+- `Main` inside any class is treated as the program entry `Main`.
 
-Compile with the compiler executable (example pipeline implemented in the project):
-1. The compiler (Cex.exe) reads `main.ce`, lexes, parses, generates `output.asm`.
-2. Assemble with NASM: `nasm -f win64 output.asm -o output.obj`
-3. Link with mingw-w64 GCC: `gcc output.obj -o output.exe -nostartfiles -lkernel32`
-
----
-
-## Design goals
-
-- Easy to learn (syntax inspired by Python)
-- Statically typed variables for simple safety (`int`, `string`, `float`, `bool`)
-- Low-level capabilities via inline assembly (`ASM:` block) and direct memory-level control
-- Simple control flow primitives (if/else, while, for, goto/checkpoints)
-- Simple object/class declarations with optional inheritance (structure only; methods are not fully supported yet)
-
----
-
-## What the language currently supports
-
-- Basic types: `int`, `string`, `float`, `bool`
-- Variable declaration:
-  - `int x = 5`
-  - `int x` (declaration without initialization)
-  - `string s = "hello"`
-- Assignments:
-  - `x = 5`
-  - `x = x + 1`
-  - compound: `x += 1`, `x -= 1`, `x *= 2`, `x /= 3`
-  - increment/decrement: `x++`, `++x`, `x--`, `--x`
-- Control flow:
-  - `if <cond>:` ... `else if <cond>:` ... `else:`
-  - `while <cond>:` ... 
-  - `for i = 0 to 10:` ... (`step` optional)
-  - `break` / `continue` within loops
-- Checkpoint/goto:
-  - `checkpoint a`
-  - `goto a` — implemented via labels and unconditional jumps
-- Input / Output:
-  - `print "text"` (string literal)
-  - `print x` (variable)
-  - `print "x = {x}"` (simple format placeholders)
-  - `input x` (reads a line, parses to `int` if variable type is `int`, otherwise stores pointer to buffer for strings)
-- Inline assembly:
-  - `ASM:` block with indented raw lines that are placed verbatim into the generated assembly
-- Basic classes and inheritance:
-  - `class Foo:` and `class Foo <Bar>:` are parsed and stored (class bodies are emitted for now as top-level statements)
-
----
-
-## What the language does NOT (yet) support
-
-- Full method/function definitions and calls (function parsing/emission not implemented)
-- Method dispatch, fields with managed memory, objects beyond flat storage
-- Rich standard library (only console IO and simple numeric conversions)
-- Full type checking and conversions (some implicit conversions are assumed)
-- Advanced expressions parsing (no operator precedence tree beyond simple `x = a op b` and unary forms)
-- Multi-file compilation and linking of C! modules (single-file programs only)
-- Full string/formatting capabilities (only simple placeholder replacement)
-
----
-
-## Lexical & Syntax notes
-
-- Syntax is indentation-based (like Python). The lexer emits `Indent` / `Dedent` tokens.
-- Lines end with newline tokens; blocks require `:` after control/definition header and an indented block below.
-- Keywords are case-sensitive and include: `import`, `class`, `public`, `static`, `void`, `if`, `else`, `while`, `for`, `to`, `break`, `continue`, `print`, `input`, `checkpoint`, `goto`, `ASM`, `int`, `string`, `float`, `bool`, `return`.
-- Identifiers: letters, digits and underscore, must not start with a digit.
-- Strings support escape sequences (`\n`, `\t`, `\\`, `\"`).
-
----
-
-## Generated assembly (Win64) — important ABI details
-
-- Console output uses `WriteConsoleA`, input uses `ReadConsoleA`. Both are called following the Windows x64 calling convention:
-  - Registers: rcx, rdx, r8, r9 for first 4 parameters; additional parameter passed on the stack slot (shadow space).
-  - The code generator reserves shadow space (`sub rsp, 40`) before calls and restores it afterwards.
-- All strings are placed into the `.data` section with `db "..."` and a trailing `0xA` (newline) when appropriate.
-- Variables are reserved in `.bss` as `resq 1` (8 bytes) and accessed as `[rel varName]`.
-- Label naming:
-  - Do not use local labels starting with `.` for code generated across scopes because NASM interprets `.label` as local to the previous non-dot label; this caused symbol-scoping issues when hosts (like checkpoints) introduced new labels. The generator therefore uses global or prefixed labels (e.g., `__endif_0`, `__while_1`) to avoid collisions and scoping surprises.
-
----
-
-## Common assembler/linker problems and fixes
-
-- Error: `symbol 'a.endif_0' not defined` and `label changed during code generation`  
-  Cause: using leading-dot labels (e.g. `.endif_0`) when a prior global or named label (like `a:` checkpoint) is present. NASM makes `.endif_0` local to `a:` (i.e., `a.endif_0`) — then references from other places mismatch.  
-  Fix: use globally-unique label names without a leading dot (for example `__endif_0`) or ensure you generate labels that are unique and global.
-
-- Error: `_intToStr label changed during code generation`  
-  Cause: helper subroutine used local labels that collided with other local labels, or labels emitted before/after changing scopes.  
-  Fix: use globally-named helper labels (`__intToStr`, `__its_digit`, etc.) and never rely on leading-dot local labels inside code that may be placed after other labels.
-
-- Linker error `cannot find output.obj`  
-  Cause: NASM assembly failed (previous errors) so `output.obj` was never created. Fix the assembler errors first, then re-run the pipeline.
-
----
-
-## Project structure (current implementation)
-
-- Cex.Lexer — lexer producing Token sequence with Indent/Dedent/Newline tokens
-- Cex.Tokens — token definitions (TokenType, Token)
-- Cex.Parser — parser producing a simple AST (Expression nodes)
-- Cex.AST — AST node definitions (VariableDeclaration, IfStatement, PrintStatement, etc.)
-- Cex.Compiler — code generator that converts AST to NASM assembly (Windows x64 style)
-- Program.cs — small frontend that ties the pipeline together and invokes nasm/gcc to produce an executable
-
----
-
-## How to use the compiler (development version)
-
-The repository includes a small driver program that:
-1. Reads `main.ce` (project-root)
-2. Runs the lexer → parser → code generator to produce `output.asm`
-3. Invokes NASM and then gcc (mingw-w64) to produce `output.exe`
-
-Configurable items in `Program.cs`:
-- `nasmPath` — path to `nasm.exe`
-- `gccPath` — path to `gcc.exe` (mingw-w64)
-- `inputFileName` — path to `.ce` input file
-- `asmFileName`, `objFileName`, `exeFileName` — output paths
-
-Example run (Windows; sample paths in project):
-```
-Cex.exe         # reads main.ce -> output.asm, assembles and links -> output.exe
-```
-
-If `nasm` or `gcc` are missing or misconfigured, the driver prints "Nie znaleziono <path>" (not found); ensure paths are correct.
-
----
-
-## Extending the language / compiler: where to start
-
-1. AST & Parser:
-   - Add new AST node types to `Cex.AST` for the feature.
-   - Update `Cex.Lexer` to emit any new tokens.
-   - Update `Cex.Parser` to parse the new syntax into AST nodes.
-
-2. Code generation:
-   - Update `Cex.Compiler.CodeGenerator` to handle the new AST node and emit appropriate assembly.
-   - Remember Windows x64 calling convention for any helper calls and maintain proper stack alignment (shadow space) around calls.
-
-3. Testing:
-   - Create small `.ce` test inputs that exercise the new syntax.
-   - Run the driver to generate assembly and check NASM and linker stage output.
-
-4. Debugging tips:
-   - Inspect generated `output.asm` carefully; NASM errors often point to label scoping or invalid instructions.
-   - If assembler reports "label changed during code generation" — search for leading-dot labels or label collisions; make labels globally unique.
-   - If the generated exe runs and immediately exits, check the pause/input code: `ReadConsoleA` must get `STD_INPUT_HANDLE` (-10) not `-11`.
+### Standard library (import System)
+Import `System` enables the following helpers:
+- `exit(code)` — terminates the program (calls ExitProcess).
+- `str(expr)` — returns a pointer to a heap string representing an integer (wrapper around integer-to-string helper).
+- `math_abs(x)`, `math_max(a,b)`, `math_min(a,b)` — helper functions emitted inline.
+- `str_len(s)` — returns length of a string (stdlib helper).
 
 ---
 
 ## Examples
 
-Print, variables, if/else:
-```c!
-int x = 0
-print "Start"
-while x < 3:
-    print "x = {x}"
-    x = x + 1
-print "Done"
+Hello world + interpolation:
+```ce
+import System
+
+public static void Main():
+    int x = 5
+    print "hello ${x}"   // prints "hello 5" + newline
 ```
 
-Input:
-```c!
-print "Enter a number: "
-input x
-print "You entered {x}"
+Function, nested calls, local variables:
+```ce
+class Program:
+
+    private static int Add(int a, int b):
+        return a + b
+
+    public static void Main():
+        int x = 2
+        int y = 3
+        int z = Add(x, Add(y, 4))
+        print "z=${z}"
 ```
 
-Inline assembly example:
-```c!
-ASM:
-    mov rax, 5
-    ; ... raw assembly placed into output.asm as-is
+Arrays:
+```ce
+public static void Main():
+    int[] arr = new int[3]
+    arr[0] = 10
+    arr[1] = 20
+    print "arr[1]=${arr[1]}"
 ```
 
-Checkpoint / goto:
-```c!
-checkpoint loopStart
-print "looping"
-goto loopStart
-```
-
-Class (declaration only at the moment):
-```c!
-class Base:
-    int baseVal = 1
-
-class Derived <Base>:
-    int derivedVal = 2
+String concatenation:
+```ce
+public static void Main():
+    string a = "Hello"
+    string b = "World"
+    string c = a + " " + b
+    print "${c}"
 ```
 
 ---
 
-## Roadmap / Next steps
+## Migration notes (important)
 
-Short term:
-- Better expression parsing with operator precedence
-- Function definitions & calls, return values
-- Improved type system & type checking
-- More robust ASM block handling (preserve edge characters `[]`, `,`, etc.)
+The parser/AST/lexer changed significantly. If you're porting old `.ce` files or compiler extensions, note these changes:
 
-Medium term:
-- Standard library (strings, math)
-- Multi-file compilation and simple linking
-- Structured classes with fields & methods
+- AST:
+  - Expressions are now first-class (NumberLiteral, StringLiteralExpr, VariableExpr, BinaryExpr, UnaryExpr, CallExpr).
+  - VariableDeclaration.Init is an Expression (replaces old `Value` string + `InitCall`).
+  - AssignmentStatement.Value is an Expression.
+  - PrintStatement supports `Segments` (interpolation) instead of format strings using `{}`.
+  - ArrayDeclaration, ArrayAccess, ArrayAssignment nodes are new.
 
-Long term:
-- Better optimization in generator
-- Cross-platform support (Linux/macOS assembler/linker paths & syscalls)
-- Package manager / standard library modules
+- Parser:
+  - Expression parser (Pratt-style) is implemented. You can write full expressions in assignments, returns, conditionals, array sizes, and `${...}` interpolation.
+  - `print` interpolation uses `${expr}` to avoid accidental `{}` use. You requested `${x}` rather than `{x}` to avoid conflicts: use `${...}`.
 
----
+- Lexer:
+  - New tokens: `new`, `[`, `]`, `PercentEquals`, and improved string escapes.
+  - String interpolation parsing occurs in the parser by feeding the `${...}` substring back into the lexer+parser.
 
-## Contribution & development notes
+- Code generation:
+  - Locals are stack-allocated; function frames are pre-sized using `CountLocals` and aligned.
+  - A simple heap arena is provided via `heapBuf` / `__heap_alloc`. Strings and arrays use it.
+  - The integer-to-string helper and other helpers are emitted into the helpers section (below code) to avoid inline helper insertion.
 
-- The codebase is structured to be small and understandable — contributions welcome.
-- When adding labels from the code generator, always ensure labels are globally-unique (use a counter and a prefix like `__lbl_{n}`) — do not rely on `.local` labels when code spans scopes and functions.
-- Keep helper routines (like `__intToStr`) in a helper area appended after main code to avoid interfering with label scoping and to keep the `start:` code contiguous.
-
----
-
-## Contact & support
-
-If you run into issues:
-- Inspect `output.asm` and run `nasm -f win64 output.asm -o output.obj` manually to get assembler errors and line numbers.
-- Fix label naming or missing symbols first; they commonly cause downstream linker failures.
+If you have existing code that used old syntax (e.g., `print "x={x}"`), change to `print "x=${x}"`.
 
 ---
 
-## License
+## Debugging & common errors
 
-MIT.
+- "Call to undefined function 'foo'": either the function doesn't exist or access rules block it. Remember that `private` methods are only callable from the same owner class.
+- "Undefined variable 'name'": variable used before declared or wrong scope (parameters of a different function).
+- NASM label relocation or "label changed during code generation": this likely indicates frame-size computation issues — ensure `CountLocals` logic matches your AST (we take maximum of branches).
+- If the generated assembly prints only part of expected output or prematurely jumps into helper code, ensure helpers are emitted into the `_helpers` section (the compiler emits helpers before function bodies).
+
+For better error messages, line numbers are present on tokens but not yet tied into AST nodes in all places. Adding line numbers to AST nodes is a recommended next change.
 
 ---
 
-Thank you — this README should help you use, debug and extend the C! language and its compiler. 
+## Limitations & roadmap
+
+Current limitations:
+- Strings are stored as pointers (no managed GC). The heap is a bump allocator (arena) and is reset only by explicit helpers. This is safe for small programs but not a full GC.
+- Only integer arithmetic (and pseudo-floating via casted floats) — no IEEE floating-point register support yet.
+- Arrays store 8-byte values (ints/pointers). No typed runtime checks.
+- No method dispatch or instances: class fields are not per-instance—class bodies still map fields to global variables (future work).
+- Only first 4 function arguments are passed in registers; >4 not implemented.
+- Error messages could be more precise (line/column); this is planned.
+
+Planned improvements (next):
+- Real per-instance objects and member access
+- Proper GC (mark & sweep or generational)
+- Better error reporting with AST-located line/column
+- Full support for >4 arguments (stack-based)
+- Float support with XMM registers
+
+---
