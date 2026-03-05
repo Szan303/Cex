@@ -58,20 +58,32 @@ public class SymbolTable
     /// protected → only callable from same class or subclass
     /// public    → callable from anywhere
     /// </summary>
-    public bool CanCall(string callerFunction, string targetFunction)
+    public bool CanCall(string callerName, string targetName)
     {
-        if (!Functions.ContainsKey(targetFunction)) return false;
+        if (!FunctionAccess.ContainsKey(targetName)) return true;
 
-        string access = FunctionAccess[targetFunction];
+        string access = FunctionAccess[targetName];
 
+        // public is always callable
         if (access == "public") return true;
 
-        // private or protected — must be in same class
-        string? targetClass = FunctionClass[targetFunction];
-        if (targetClass == null) return true;  // top-level, always accessible
+        // get the class that owns the target
+        string? targetClass = FunctionClass.GetValueOrDefault(targetName);
 
-        string? callerClass = FunctionClass.TryGetValue(callerFunction, out var cc) ? cc : null;
+        // get the class that owns the caller
+        string? callerClass = FunctionClass.GetValueOrDefault(callerName);
 
-        return callerClass == targetClass;
+        // private/protected: only callable from same class
+        if (targetClass != null && callerClass != null && targetClass == callerClass)
+            return true;
+
+        // static methods in same class can call each other
+        if (targetClass != null && callerClass == null)
+        {
+            // top-level caller trying to call class method — check if public
+            return access == "public";
+        }
+
+        return access != "private";
     }
 }

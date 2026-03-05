@@ -1,4 +1,4 @@
-import System
+import Math
 
 class Program:
 
@@ -15,7 +15,7 @@ class Program:
 
     int Add(int o):
         o += 5
-        Math.sqrt(o)
+        o = Math.sqrt(2)
         return o
 
     public static void Main():
