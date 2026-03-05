@@ -1,0 +1,17 @@
+string String.upper(string s):
+    // handled via ASM block — pure C! can't do char manipulation yet
+    // placeholder until char type exists
+    return s
+
+string String.lower(string s):
+    return s
+
+int String.contains(string s, int c):
+    int i = 0
+    int len = length(s)
+    for i = 0 to len:
+        // needs char indexing — coming soon
+    return 0
+
+string String.concat(string a, string b):
+    return a + b

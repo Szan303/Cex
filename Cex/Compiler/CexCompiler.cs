@@ -18,7 +18,6 @@ public class CexCompiler
         _projectRoot = projectRoot;
     }
 
-    // ================================================================= public
     public string Compile()
     {
         var sourceFiles = Directory
@@ -44,7 +43,7 @@ public class CexCompiler
             RegisterSymbols(unit);
 
         foreach (var unit in units)
-            ValidateCalls(unit.Expressions, unit.SourceFile);
+            ValidateCalls(unit.Expressions, unit.SourceFile, callerFunction: null);
 
         FindEntryPoint();
 
@@ -53,6 +52,7 @@ public class CexCompiler
     }
 
     // ================================================================= private
+
     private CompilationUnit ParseFile(string filePath)
     {
         string source = File.ReadAllText(filePath);
@@ -79,7 +79,7 @@ public class CexCompiler
             switch (e)
             {
                 case FunctionDeclaration fn:
-                    _symbols.RegisterFunction(fn, unit.SourceFile);
+                    _symbols.RegisterFunction(fn, unit.SourceFile, ownerClass: null);
                     break;
 
                 case ClassDeclaration cls:
@@ -94,20 +94,16 @@ public class CexCompiler
         }
     }
 
-    // Register all methods inside a class body as callable functions.
-    // A method called 'Main' inside any class becomes the program entry point.
     private void RegisterClassMembers(ClassDeclaration cls, string sourceFile)
     {
         foreach (var member in cls.Body)
         {
             if (member is not FunctionDeclaration method) continue;
 
-            // 'Main' inside any class is THE entry point — register as plain "Main"
-            bool isEntryPoint = method.Name == "Main";
+            // Main inside any class = entry point — register as plain "Main"
+            string registeredName = method.Name == "Main" ? "Main" : method.Name;
 
-            string registeredName = isEntryPoint
-                ? "Main"
-                : $"{cls.Name}.{method.Name}";
+            if (_symbols.FunctionExists(registeredName)) continue;
 
             var fn = new FunctionDeclaration
             {
@@ -118,54 +114,132 @@ public class CexCompiler
                 Body       = method.Body
             };
 
-            // avoid duplicate registration if already registered
-            if (!_symbols.FunctionExists(registeredName))
-                _symbols.RegisterFunction(fn, sourceFile);
+            _symbols.RegisterFunction(fn, sourceFile, ownerClass: cls.Name);
         }
     }
 
-    private void ValidateCalls(List<Expression> exprs, string sourceFile)
+    // callerFunction = the function we are currently validating inside (for access checks)
+    private void ValidateCalls(List<Expression> exprs, string sourceFile, string? callerFunction)
     {
         foreach (var e in exprs)
         {
             switch (e)
             {
                 case FunctionCall fc:
-                    if (!IsStdLib(fc.Name) && !_symbols.FunctionExists(fc.Name))
-                        throw new Exception(
-                            $"[{Path.GetFileName(sourceFile)}] " +
-                            $"Call to undefined function '{fc.Name}'");
+                    CheckCall(fc.Name, callerFunction, sourceFile);
+                    ValidateExprList(fc.Arguments, sourceFile, callerFunction);
+                    break;
+
+                // new AST: VariableDeclaration.Init may contain a CallExpr
+                case VariableDeclaration v:
+                    if (v.Init != null)
+                        ValidateExpr(v.Init, sourceFile, callerFunction);
+                    break;
+
+                case AssignmentStatement a:
+                    if (a.Value != null)
+                        ValidateExpr(a.Value, sourceFile, callerFunction);
+                    break;
+
+                case ReturnStatement r:
+                    if (r.Value != null)
+                        ValidateExpr(r.Value, sourceFile, callerFunction);
+                    break;
+
+                case PrintStatement p:
+                    if (p.Segments != null)
+                        foreach (var seg in p.Segments)
+                            if (seg.Expr != null)
+                                ValidateExpr(seg.Expr, sourceFile, callerFunction);
                     break;
 
                 case IfStatement i:
-                    ValidateCalls(i.ThenBranch, sourceFile);
+                    ValidateCalls(i.ThenBranch, sourceFile, callerFunction);
                     foreach (var ei in i.ElseIfs)
-                        ValidateCalls(ei.Body, sourceFile);
-                    ValidateCalls(i.ElseBranch, sourceFile);
+                        ValidateCalls(ei.Body, sourceFile, callerFunction);
+                    ValidateCalls(i.ElseBranch, sourceFile, callerFunction);
                     break;
 
                 case WhileStatement w:
-                    ValidateCalls(w.Body, sourceFile);
+                    ValidateCalls(w.Body, sourceFile, callerFunction);
                     break;
 
                 case ForStatement f:
-                    ValidateCalls(f.Body, sourceFile);
+                    ValidateCalls(f.Body, sourceFile, callerFunction);
                     break;
 
                 case FunctionDeclaration fn:
-                    ValidateCalls(fn.Body, sourceFile);
+                    ValidateCalls(fn.Body, sourceFile, callerFunction: fn.Name);
                     break;
 
                 case ClassDeclaration cls:
-                    ValidateCalls(cls.Body, sourceFile);
+                    ValidateCalls(cls.Body, sourceFile, callerFunction);
                     break;
 
                 case TryStatement t:
-                    ValidateCalls(t.TryBody,     sourceFile);
-                    ValidateCalls(t.CatchBody,   sourceFile);
-                    ValidateCalls(t.FinallyBody, sourceFile);
+                    ValidateCalls(t.TryBody,     sourceFile, callerFunction);
+                    ValidateCalls(t.CatchBody,   sourceFile, callerFunction);
+                    ValidateCalls(t.FinallyBody, sourceFile, callerFunction);
                     break;
             }
+        }
+    }
+
+    // recursively validate all function calls inside an expression
+    private void ValidateExpr(Expression expr, string sourceFile, string? callerFunction)
+    {
+        switch (expr)
+        {
+            case CallExpr c:
+                CheckCall(c.Name, callerFunction, sourceFile);
+                foreach (var arg in c.Args)
+                    ValidateExpr(arg, sourceFile, callerFunction);
+                break;
+
+            case BinaryExpr b:
+                ValidateExpr(b.Left,  sourceFile, callerFunction);
+                ValidateExpr(b.Right, sourceFile, callerFunction);
+                break;
+
+            case UnaryExpr u:
+                ValidateExpr(u.Operand, sourceFile, callerFunction);
+                break;
+
+            case ArrayAccess a:
+                ValidateExpr(a.Index, sourceFile, callerFunction);
+                break;
+
+            // literals and variable references need no validation
+            case NumberLiteral:
+            case StringLiteralExpr:
+            case VariableExpr:
+                break;
+        }
+    }
+
+    private void ValidateExprList(List<Expression> exprs, string sourceFile, string? callerFunction)
+    {
+        foreach (var e in exprs)
+            ValidateExpr(e, sourceFile, callerFunction);
+    }
+
+    private void CheckCall(string targetName, string? callerFunction, string sourceFile)
+    {
+        if (IsStdLib(targetName)) return;
+
+        if (!_symbols.FunctionExists(targetName))
+            throw new Exception(
+                $"[{Path.GetFileName(sourceFile)}] " +
+                $"Call to undefined function '{targetName}'");
+
+        if (callerFunction != null && !_symbols.CanCall(callerFunction, targetName))
+        {
+            string  access     = _symbols.FunctionAccess[targetName];
+            string? ownerClass = _symbols.FunctionClass[targetName];
+            throw new Exception(
+                $"[{Path.GetFileName(sourceFile)}] " +
+                $"Cannot call {access} function '{targetName}' " +
+                $"(defined in class '{ownerClass}') from '{callerFunction}'");
         }
     }
 
@@ -174,11 +248,12 @@ public class CexCompiler
         if (!_symbols.FunctionExists("Main"))
             throw new Exception(
                 "No entry point found. " +
-                "Define 'void Main():' as a top-level function " +
-                "or inside any class in one of your .ce files.");
+                "Define 'void Main():' as a top-level function or inside any class.");
     }
 
     private static bool IsStdLib(string name) => name is
-        "math_abs" or "math_max" or "math_min" or
-        "str_len"  or "str_upper" or "str_lower";
+        "exit"      or
+        "str"       or
+        "math_abs"  or "math_max" or "math_min" or
+        "str_len"   or "str_upper" or "str_lower";
 }

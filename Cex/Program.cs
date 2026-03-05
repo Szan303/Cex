@@ -5,109 +5,140 @@ using Cex.Compiler;
 
 class Program
 {
+    // =====================================================================
+    // SET YOUR PROJECT FOLDER HERE
+    // =====================================================================
+    private const string DefaultProjectRoot = @"C:\Users\weter\Projects\MyProject";
+    // =====================================================================
+
     static void Main(string[] args)
     {
-        // usage: Cex.exe <path-to-project-folder>
-        // example: Cex.exe C:\Users\weter\Projects\MyGame
         string projectRoot;
 
-        if (args.Length > 0 && Directory.Exists(args[0]))
+        if (args.Length > 0)
         {
+            // passed as command line argument: Cex.exe "C:\path\to\project"
             projectRoot = args[0];
-        }
-        else if (args.Length > 0)
-        {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"Error: folder not found: {args[0]}");
-            Console.ResetColor();
-            return;
         }
         else
         {
-            // fallback: use current working directory
-            projectRoot = Directory.GetCurrentDirectory();
-            Console.WriteLine($"No path given — using current directory: {projectRoot}");
+            // use the constant above
+            // projectRoot = DefaultProjectRoot;
+            projectRoot = @"C:\Users\weter\RiderProjects\Cex\Cex";
         }
 
-        // output files go next to the project folder, not inside it
-        string projectName = Path.GetFileName(projectRoot.TrimEnd('\\', '/'));
-        string outputDir   = projectRoot;
-        string asmFile     = Path.Combine(outputDir, "output.asm");
-        string objFile     = Path.Combine(outputDir, "output.obj");
-        string exeFile     = Path.Combine(outputDir, $"{projectName}.exe");
+        // validate
+        if (!Directory.Exists(projectRoot))
+        {
+            Error($"Project folder not found: {projectRoot}");
+            Error("Usage: Cex.exe <path-to-project-folder>");
+            Error($"   or: set DefaultProjectRoot in Program.cs");
+            return;
+        }
 
-        // paths to NASM and GCC — stored next to Cex.exe
-        string compilerDir = AppContext.BaseDirectory;
-        string nasmPath    = Path.Combine(compilerDir, "NASM", "nasm.exe");
-        string gccPath     = Path.Combine(compilerDir,
+        // paths to tools — always relative to Cex.exe location
+        // string compilerDir = AppContext.BaseDirectory;
+        string nasmPath    = Path.Combine(projectRoot, "NASM", "nasm.exe");
+        string gccPath     = Path.Combine(projectRoot,
             @"winlibs-x86_64-posix-seh-gcc-15.2.0-mingw-w64msvcrt-13.0.0-r1\mingw64\bin\gcc.exe");
+
+        // output files go into the project folder
+        string projectName = Path.GetFileName(projectRoot.TrimEnd('\\', '/'));
+        string asmFile     = Path.Combine(projectRoot, "output.asm");
+        string objFile     = Path.Combine(projectRoot, "output.obj");
+        string exeFile     = Path.Combine(projectRoot, $"{projectName}.exe");
+
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine("===========================================");
+        Console.WriteLine("         C! Compiler");
+        Console.WriteLine("===========================================");
+        Console.ResetColor();
+        Console.WriteLine($"Project : {projectRoot}");
+        Console.WriteLine($"Output  : {exeFile}");
+        Console.WriteLine();
 
         try
         {
-            Console.WriteLine($"Compiling project: {projectRoot}");
-            Console.WriteLine();
-
-            var compiler = new CexCompiler(projectRoot);
-            string asm   = compiler.Compile();
-
+            // ---- 1. compile .ce → .asm ----
+            Console.Write("Compiling... ");
+            var cex   = new CexCompiler(projectRoot);
+            string asm = cex.Compile();
             File.WriteAllText(asmFile, asm);
-            Console.WriteLine("ASM generated.");
+            Ok("done");
 
+            // ---- 2. assemble .asm → .obj ----
+            Console.Write("Assembling... ");
             if (!File.Exists(nasmPath))
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"NASM not found at: {nasmPath}");
-                Console.ResetColor();
+                Error($"NASM not found at {nasmPath}");
                 return;
             }
+            bool nasmOk = RunProcess(nasmPath, $"-f win64 \"{asmFile}\" -o \"{objFile}\"");
+            if (!nasmOk) { Error("NASM failed — check output.asm for errors"); return; }
+            Ok("done");
 
+            // ---- 3. link .obj → .exe ----
+            Console.Write("Linking...    ");
             if (!File.Exists(gccPath))
             {
-                Console.ForegroundColor = ConsoleColor.Red;
-                Console.WriteLine($"GCC not found at: {gccPath}");
-                Console.ResetColor();
+                Error($"GCC not found at {gccPath}");
                 return;
             }
+            bool gccOk = RunProcess(gccPath,
+                $"\"{objFile}\" -o \"{exeFile}\" -nostartfiles -lkernel32");
+            if (!gccOk) { Error("GCC linker failed"); return; }
+            Ok("done");
 
-            Console.WriteLine("Assembling...");
-            RunProcess(nasmPath, $"-f win64 \"{asmFile}\" -o \"{objFile}\"");
-
-            Console.WriteLine("Linking...");
-            RunProcess(gccPath, $"\"{objFile}\" -o \"{exeFile}\" -nostartfiles -lkernel32");
-
+            // ---- success ----
             Console.WriteLine();
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine($"Done! Output: {exeFile}");
+            Console.WriteLine($"Build succeeded → {exeFile}");
             Console.ResetColor();
         }
         catch (Exception ex)
         {
-            Console.ForegroundColor = ConsoleColor.Red;
-            Console.WriteLine($"Compile error: {ex.Message}");
-            Console.ResetColor();
+            Console.WriteLine();
+            Error($"Compile error: {ex.Message}");
         }
     }
 
-    static void RunProcess(string exe, string args)
+    // ----------------------------------------------------------------- helpers
+    static bool RunProcess(string exe, string arguments)
     {
         var p = new Process();
         p.StartInfo.FileName               = exe;
-        p.StartInfo.Arguments              = args;
+        p.StartInfo.Arguments              = arguments;
         p.StartInfo.UseShellExecute        = false;
         p.StartInfo.RedirectStandardOutput = true;
         p.StartInfo.RedirectStandardError  = true;
         p.Start();
 
-        string output = p.StandardOutput.ReadToEnd();
-        string err    = p.StandardError.ReadToEnd();
+        string stdout = p.StandardOutput.ReadToEnd();
+        string stderr = p.StandardError.ReadToEnd();
         p.WaitForExit();
 
-        if (!string.IsNullOrWhiteSpace(output)) Console.WriteLine(output);
-        if (!string.IsNullOrWhiteSpace(err))
+        if (!string.IsNullOrWhiteSpace(stdout)) Console.WriteLine(stdout);
+        if (!string.IsNullOrWhiteSpace(stderr))
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine(err);
+            Console.WriteLine(stderr);
             Console.ResetColor();
         }
+
+        return p.ExitCode == 0;
+    }
+
+    static void Ok(string msg)
+    {
+        Console.ForegroundColor = ConsoleColor.Green;
+        Console.WriteLine(msg);
+        Console.ResetColor();
+    }
+
+    static void Error(string msg)
+    {
+        Console.ForegroundColor = ConsoleColor.Red;
+        Console.WriteLine($"ERROR: {msg}");
+        Console.ResetColor();
     }
 }

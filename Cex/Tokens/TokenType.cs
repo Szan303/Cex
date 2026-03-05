@@ -44,6 +44,8 @@ public enum TokenType
     Star,           // *
     Slash,          // /
     Percent,        // %
+    New,
+    PercentEquals,
 
     // Punctuation
     Colon,
