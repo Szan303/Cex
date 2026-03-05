@@ -258,6 +258,14 @@ public class Parser
         int    line = Peek().Line;
         string name = Advance().Value;
 
+        // handle dot notation: Math.power(x, n)  String.upper(s)  etc.
+        if (Check(TokenType.Dot))
+        {
+            Advance(); // consume '.'
+            string method = Consume(TokenType.Identifier, "Expected method name after '.'").Value;
+            name = name + "." + method; // e.g. "Math.sqrt"
+        }
+
         if (Match(TokenType.ParenthesisOpen))
         {
             var args = new List<Expression>();

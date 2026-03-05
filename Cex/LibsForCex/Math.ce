@@ -1,0 +1,39 @@
+int Math.abs(int x):
+    if x < 0:
+        return -x
+    return x
+
+int Math.max(int a, int b):
+    if a > b:
+        return a
+    return b
+
+int Math.min(int a, int b):
+    if a < b:
+        return a
+    return b
+
+int Math.clamp(int x, int min, int max):
+    if x < min:
+        return min
+    if x > max:
+        return max
+    return x
+
+int Math.power(int base, int exp):
+    int result = 1
+    for i = 0 to exp:
+        result = result * base
+    return result
+
+int Math.sqrt(int x):
+    if x <= 0:
+        return 0
+    if x == 1:
+        return 1
+    int guess = x / 2
+    int prev = 0
+    while prev != guess:
+        prev = guess
+        guess = (guess + x / guess) / 2
+    return guess

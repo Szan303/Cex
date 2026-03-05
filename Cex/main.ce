@@ -13,8 +13,9 @@ class Program:
             return 1
         return n * Factorial(n - 1)
 
-    private static int Add(int o):
+    int Add(int o):
         o += 5
+        Math.sqrt(o)
         return o
 
     public static void Main():
@@ -26,6 +27,10 @@ class Program:
             print "wynik=${z}"
             print "|"
             Test()
+
+            float res = Add(x)
+            print "value of Add: " + res
+
             int result = Factorial(x)
             print result
         else:

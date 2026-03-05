@@ -652,22 +652,66 @@ public class CodeGenerator
     }
 
     private bool EmitStdLibCall(CallExpr fc, string resultReg)
+{
+    switch (fc.Name)
     {
-        switch (fc.Name)
+        // ---------------------------------------------------------------- exit
+        case "exit":
+            if (fc.Args.Count > 0) EmitExpr(fc.Args[0]);
+            else _text.AppendLine("    mov  rax, 0");
+            _text.AppendLine("    mov  rcx, rax");
+            _text.AppendLine("    sub  rsp, 40");
+            _text.AppendLine("    call ExitProcess");
+            _text.AppendLine("    add  rsp, 40");
+            return true;
+
+        // ---------------------------------------------------------------- length(x)
+        // universal: string → char count, int → digit count
+        case "length":
         {
-            case "exit":
-                if (fc.Args.Count > 0) EmitExpr(fc.Args[0]); else _text.AppendLine("    mov  rax, 0");
-                _text.AppendLine("    mov  rcx, rax"); _text.AppendLine("    sub  rsp, 40");
-                _text.AppendLine("    call ExitProcess"); _text.AppendLine("    add  rsp, 40");
-                return true;
-            case "math_abs": { int id=_labelCount++; EmitExpr(fc.Args[0]); _text.AppendLine("    test rax, rax"); _text.AppendLine($"    jns  __abs_{id}"); _text.AppendLine("    neg  rax"); _text.AppendLine($"__abs_{id}:"); if (resultReg!="rax") _text.AppendLine($"    mov  {resultReg}, rax"); return true; }
-            case "math_max": { int id=_labelCount++; EmitExpr(fc.Args[0]); _text.AppendLine("    push rax"); EmitExpr(fc.Args[1]); _text.AppendLine("    mov  rbx, rax"); _text.AppendLine("    pop  rax"); _text.AppendLine("    cmp  rax, rbx"); _text.AppendLine($"    jge  __max_{id}"); _text.AppendLine("    mov  rax, rbx"); _text.AppendLine($"__max_{id}:"); if (resultReg!="rax") _text.AppendLine($"    mov  {resultReg}, rax"); return true; }
-            case "math_min": { int id=_labelCount++; EmitExpr(fc.Args[0]); _text.AppendLine("    push rax"); EmitExpr(fc.Args[1]); _text.AppendLine("    mov  rbx, rax"); _text.AppendLine("    pop  rax"); _text.AppendLine("    cmp  rax, rbx"); _text.AppendLine($"    jle  __min_{id}"); _text.AppendLine("    mov  rax, rbx"); _text.AppendLine($"__min_{id}:"); if (resultReg!="rax") _text.AppendLine($"    mov  {resultReg}, rax"); return true; }
-            case "str_len": { EmitExpr(fc.Args[0]); _text.AppendLine("    mov  rsi, rax"); EmitStrLen("rsi","rax"); if (resultReg!="rax") _text.AppendLine($"    mov  {resultReg}, rax"); return true; }
-            case "str": { EmitToStringPtr(fc.Args[0]); if (resultReg!="rax") _text.AppendLine($"    mov  {resultReg}, rax"); return true; }
-            default: return false;
+            int id = _labelCount++;
+            if (fc.Args.Count > 0 && IsStringArg(fc.Args[0]))
+            {
+                EmitExpr(fc.Args[0]);
+                _text.AppendLine("    mov  rsi, rax");
+                _text.AppendLine("    xor  rax, rax");
+                _text.AppendLine($"__len_s_{id}:");
+                _text.AppendLine("    cmp  byte [rsi+rax], 0");
+                _text.AppendLine($"    je   __len_s_done_{id}");
+                _text.AppendLine("    inc  rax");
+                _text.AppendLine($"    jmp  __len_s_{id}");
+                _text.AppendLine($"__len_s_done_{id}:");
+            }
+            else
+            {
+                EmitExpr(fc.Args[0]);
+                _text.AppendLine("    test rax, rax");
+                _text.AppendLine($"    jns  __len_pos_{id}");
+                _text.AppendLine("    neg  rax");
+                _text.AppendLine($"__len_pos_{id}:");
+                _text.AppendLine("    push rbx");
+                _text.AppendLine("    mov  rbx, 10");
+                _text.AppendLine("    xor  rcx, rcx");
+                _text.AppendLine($"__len_i_{id}:");
+                _text.AppendLine("    inc  rcx");
+                _text.AppendLine("    cqo");
+                _text.AppendLine("    idiv rbx");
+                _text.AppendLine("    test rax, rax");
+                _text.AppendLine($"    jnz  __len_i_{id}");
+                _text.AppendLine("    mov  rax, rcx");
+                _text.AppendLine("    pop  rbx");
+            }
+            if (resultReg != "rax") _text.AppendLine($"    mov  {resultReg}, rax");
+            return true;
         }
+
+        default: return false;
     }
+}
+
+private bool IsStringArg(Expression e) =>
+    e is StringLiteralExpr ||
+    (e is VariableExpr ve && GetVarType(ve.Name) == "string");
 
     private void EmitReturn(ReturnStatement r)
     {
