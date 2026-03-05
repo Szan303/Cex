@@ -1,7 +1,7 @@
 import System
 
 class Program:
-	public static void Main:
+	public static void Main():
 
 		print "hello world!"
 		int x = 1
