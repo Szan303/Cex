@@ -1,0 +1,34 @@
+class Math:
+    int abs(int x):
+        if x < 0:
+            return -x
+        return x
+
+    int max(int a, int b):
+        if a > b:
+            return a
+        return b
+
+    int min(int a, int b):
+        if a < b:
+            return a
+        return b
+
+    int clamp(int x, int min, int max):
+        if x < min:
+            return min
+        if x > max:
+            return max
+        return x
+
+    int power(int base, int exp):
+        int result = 1
+        for i = 0 to exp:
+            result = result * base
+        return result
+
+    float sqrt(int x):
+        ASM:
+                    cvtsi2sd xmm0, rcx
+                    sqrtsd   xmm0, xmm0
+                    movq     rax,  xmm0
