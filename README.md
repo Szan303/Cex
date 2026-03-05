@@ -1,293 +1,326 @@
-# C! Compiler — Documentation
+# C! Compiler — Documentation (version 0.6.8)
 
-This README documents the current C! compiler: how to use it, language features (expressions, return expressions, arrays, nested calls, string interpolation), tooling/CLI, and migration notes for the updated parser/lexer/codegen.
+This document describes the C! compiler v0.6.8: how to use it, language features supported, how to write libraries in C!, and implementation/interop notes relevant to this release.
 
 Contents
 - Overview
-- Quick start (build & run)
-- CLI and project layout
-- Language reference
-  - Files & multi-file projects
-  - Lexical notes
-  - Expressions (Pratt-style)
-  - Functions & return expressions
-  - Local variables & stack allocation
-  - Arrays (heap-allocated)
-  - Function calls and nested calls
-  - Strings, interpolation and concatenation
-  - Classes & access modifiers (public/protected/private)
-  - Standard library (import System)
+- What's new in 0.6.8
+- Project layout and build
+- Language reference (high-level)
+  - Files & imports
+  - Classes & functions
+  - Function naming and dotted names
+  - Statements and expressions
+  - String interpolation
+  - For/while/if
+  - ASM blocks (inline assembly)
+  - Float support
+  - Printing and IO
+  - Built-ins
+- Writing libraries (pure C! libs)
+- Writing native/ASM-backed functions
+- Calling convention and codegen notes
+- Symbol resolution rules
+- Known limitations & migration notes
 - Examples
-- Migration notes (from previous compiler versions)
-- Debugging & common errors
-- Limitations & roadmap
 
 ---
 
 ## Overview
 
-This C! compiler reads `.ce` source files under a project directory, parses them into an AST, validates calls and access modifiers, and emits a single assembly file which is assembled and linked into an executable. The compiler now includes:
-
-- Full expression support (operator precedence, unary ops, boolean operators)
-- Return expressions (any expression can be returned)
-- Arrays with `new` syntax (heap-allocated, simple arena allocator)
-- Nested and recursive function calls (argument evaluation and calling conventions)
-- String interpolation using `${...}` inside string literals and string concatenation (`+`)
-- Local variables allocated in function stack frames
+C! is a small compiled language that emits x86-64 assembly (NASM style) and links to a small runtime. Version 0.6.8 focuses on moving the standard library into pure C! library files, better module/class function registration, and initial float support (printing and returned values from ASM-backed functions). The compiler now registers class methods both as plain names and dot-qualified names (e.g. `sqrt` and `Math.sqrt`).
 
 ---
 
-## Quick start (build & run)
+## What's new in 0.6.8
 
-1. Build the compiler (your existing .NET / dotnet or IDE configuration).
-2. Place your project in a folder (see "Project layout" below).
-3. Run the compiler and pass the project's folder path:
-
-```
-Cex.exe C:\path\to\YourProject
-```
-
-If no path is passed, the default project root constant in `Program.cs` is used.
-
-The compiler will:
-- Scan `.ce` files recursively in the project folder
-- Parse and validate them
-- Emit `output.asm` to the project folder
-- Assemble (NASM) and link (gcc/mingw) into `ProjectName.exe`
-
-Paths to NASM and GCC are determined relative to the compiler binary; see `Program.cs` for configuration.
+- Standard library functions removed from the compiler core and implemented as .ce library files (e.g., `Math.ce`).
+- Imports search path expanded (same dir, `libs/`, project root, exe `libs/`).
+- Class methods are registered under both `Name` and `ClassName.Name` to make calls flexible.
+- Parser and symbol handling extended to support dotted function names and dotted function definitions via classes.
+- Initial float support:
+  - `float` type stored as 8 bytes (IEEE-754 double).
+  - `Math.sqrt` example implemented via an ASM block returning a float (xmm -> rax via movq).
+  - `__printFloat` helper prints floats with 3 decimal places.
+- ASM blocks in functions implicitly return: when an `AsmBlock` is the last statement in a function, the compiler inserts a jump to the function return epilogue so the value in `rax` (or xmm0 converted to `rax` via movq) is returned.
+- String equality compares contents (byte-by-byte) rather than pointer equality.
+- For-loop `step` supports negative values (loop direction determined at runtime).
+- `print` prints booleans as `true` / `false`.
+- `length(x)` available as compiler intrinsic for strings and ints.
 
 ---
 
-## CLI and project layout
+## Project layout and build
 
-Recommended project layout:
+Recommended layout:
 
-```
-MyGame/
-├── main.ce
-├── math.ce
-├── strings.ce
-└── models/
-    └── player.ce
-```
+project/
+- main.ce
+- Math.ce
+- libs/
+  - String.ce
+  - OtherLibs.ce
 
-Usage:
+The compiler recursively finds `.ce` files starting from a specified `main.ce` or project root. Imports are resolved in this order:
 
-- Build the compiler and place NASM/GCC toolchains where `Program.cs` expects them, or adjust paths in `Program.cs`.
-- Run: `Cex.exe <path-to-project-folder>`
+1. Same directory as the importing file: `<dir>/<Module>.ce`
+2. `<dir>/libs/<Module>.ce`
+3. Project root: `<projectRoot>/<Module>.ce`
+4. Project root libs: `<projectRoot>/libs/<Module>.ce`
+5. Executable `libs` folder: `<exeDir>/libs/<Module>.ce`
 
-Output: `output.asm`, `output.obj`, and `ProjectName.exe` are produced in the project folder.
+How to compile:
+- Use the provided driver (e.g. CLI or IDE run configuration). The compiler entry is `CexCompiler` and expects a project root containing `main.ce`.
+- Example: place `main.ce` and `Math.ce` in the same folder and run the compiler; it will parse both and generate assembly/output.
+
+(Exact invocation depends on your build/run wrapper; the library offers `new CexCompiler(projectRoot).Compile()` programmatically.)
 
 ---
 
-## Language reference
+## Language reference (concise)
 
-This section summarizes syntax and semantics.
+### Files & imports
+- Top of file: `import Math` — imports module `Math` (searches for `Math.ce` using search order above).
+- `import System` is a special built-in import that refers to the runtime and is ignored by the import resolver.
 
-### Files & multi-file projects
-- All `.ce` files under the project root are parsed and compiled together.
-- Functions and classes declared in any file are available across the project (subject to access modifiers).
-- Imports like `import System` enable stdlib functions; you do not need to `import` your own project files (the compiler finds them automatically).
+### Classes & functions
+- Functions may be declared at top level or inside a `class` block.
+- Inside a class, functions are declared without the `Class.` prefix:
+  ```ce
+  class Math:
+      float sqrt(int x):
+          ASM:
+              cvtsi2sd xmm0, rcx
+              sqrtsd xmm0, xmm0
+              movq rax, xmm0
+  ```
+- Functions inside a class are registered two ways:
+  - Plain name: `sqrt`
+  - Dot-qualified name: `Math.sqrt`
+  This lets callers use either `sqrt(...)` or `Math.sqrt(...)` depending on preference/context.
 
-### Lexical notes
-- Indentation-based block structure (like Python).
-- Strings are double-quoted.
-- Identifiers: letters, digits, underscores; must not start with digits.
-- New tokens:
-  - `new` for array allocation
-  - `[` and `]` for array indexing
-  - `%=` (mod-assign) supported
-- Comments: `//` to end of line.
+### Function naming and dotted names
+- Function calling syntax supports dotted calls: `Math.sqrt(x)` and `sqrt(x)` (if `sqrt` was registered).
+- Parser supports dot-call tokens and function declarations where the name may be dotted (via class registration).
 
-### Expressions
-- Full expression support with operator precedence and associativity:
-  - Unary: `-`, `not`
-  - Binary arithmetic: `* / %`, then `+ -`
-  - Comparison: `< <= > >= == !=`
-  - Boolean: `and` (`&&`), `or` (`||`)
-- Parentheses allowed: `(a + b) * c`
-- Expression nodes evaluate to `int` (for now) or `string` where appropriate.
+### Statements & expressions
+- Common statements: `if`, `for`, `while`, `return`, `break`, `continue`, `print`, `input`, `goto`, `checkpoint`.
+- Expressions support `+`, `-`, `*`, `/`, `%`, `==`, `!=`, `<`, `>`, `<=`, `>=`, logical `&&`, `||`, unary `-`, `not`.
+- String concatenation uses `+`. If the left operand of `+` is a string, string concatenation is performed.
 
-Examples:
-```
-int a = (x + 2) * y
-int ok = (x > 0) and (y < 10)
+### String interpolation
+- Strings support `${expr}` interpolation inside `"` string literals, e.g. `"value=${x}"`.
+- `print` accepts interpolation and concatenation chains.
+
+### For / While / If
+- For loop syntax: `for i = start to end:` optional `step` value:
+  ```
+  for i = 10 to 0 step -1:
+      print "${i}"
+  ```
+- Step can be negative. The compiler checks step sign at runtime and uses appropriate comparison (>=/<=).
+
+### ASM blocks (inline assembly)
+- `ASM:` introduces a block of assembly lines (NASM syntax). Example:
+  ```ce
+  float sqrt(int x):
+      ASM:
+          cvtsi2sd xmm0, rcx
+          sqrtsd xmm0, xmm0
+          movq rax, xmm0
+  ```
+- ASM blocks emit the assembly lines verbatim (prefixed with indentation) into the function body.
+- If an `AsmBlock` is the last statement in a function, the compiler automatically appends a jump to the function return epilogue (`jmp __ret_<func>`). This allows ASM blocks to act like the return value provider — `rax` (or xmm0 moved to rax) becomes the function return.
+- Use `rcx, rdx, r8, r9` for the first four integer/pointer parameters (Windows x64 convention used by this compiler). For float arguments you should convert/store according to conventions used in the assembly you write (see "Calling convention" below).
+
+### Float support
+- `float` type stores a 64-bit IEEE754 value (double) in memory (8 bytes).
+- Function returning `float`: either implement in C! (pure C! math algorithm) or use an ASM block to produce `xmm0` and move it to `rax` (`movq rax, xmm0`) — the compiler will treat `rax` as the raw bits and store/return them.
+- Printing floats: compiler provides `__printFloat` helper. It expects `xmm0` loaded with the double value. It prints the value as `integer.fraction` with 3 decimal places. Example printing in codegen will call `__printFloat`.
+- Note: full floating point arithmetic is partial — arithmetic operators currently operate on integers; functions returning floats should be created or implemented via ASM or pure-C! algorithms.
+
+### Printing and IO
+- `print` supports:
+  - string literals, interpolated strings, boolean, integers, and floats
+  - booleans printed as `true` / `false`
+  - `print` of `float` goes through `__printFloat`.
+- `input` reads a line into a buffer accessible as a string var or parsed numeric value.
+
+### Built-ins
+- `exit(code)` — exits the process (compiler emits call to ExitProcess with code).
+- `length(x)` — universal length:
+  - If `x` is a string: returns number of characters.
+  - If `x` is an int: returns the number of digits in its decimal representation (negative sign excluded).
+  - Arrays and other types: planned / limited support (platform-specific).
+- The large standard library was moved into .ce files (e.g., `Math.ce`, `String.ce`), not baked into the compiler.
+
+---
+
+## Writing libraries in C!
+
+C! libraries are plain `.ce` files. Best practice: wrap related functions in a `class` so the compiler registers dotted names automatically.
+
+Example `Math.ce`:
+```ce
+class Math:
+
+    int abs(int n):
+        if n < 0:
+            return -n
+        return n
+
+    float sqrt(int x):
+        ASM:
+            cvtsi2sd xmm0, rcx
+            sqrtsd   xmm0, xmm0
+            movq     rax,  xmm0
 ```
 
-### Functions & return expressions
-- Function declaration:
-```
-public static int Add(int x, int y):
-    return x + y
-```
-- Any expression can be returned:
-```
-return (a + b) * 2
-```
-- Functions may be top-level or methods inside classes. Methods inside classes are registered with owner class info for access control.
+Save `Math.ce` in the same folder as `main.ce` or in `libs/Math.ce`. Then in `main.ce`:
 
-### Local variables & stack allocation
-- Local variables are created with `int`, `string`, etc. inside functions; they are allocated in the function's stack frame:
-```
-int x = 10
-```
-- The compiler computes a stack frame large enough for the function's locals (aligned to 16 bytes). Locals live in `[rbp - offset]`.
+```ce
+import Math
 
-### Arrays
-- Arrays are created with `new` and are heap-allocated via a simple arena allocator:
-```
-int[] arr = new int[10]
-arr[0] = 5
-int v = arr[1]
-```
-- The compiler stores an array pointer in a variable; elements are 8-byte integers.
-- The allocator is a bump allocator (arena) exposed via internal helper labels (`__heap_alloc`, `__heap_reset`). This is currently simple and not GC’d.
-
-### Nested function calls
-- Arguments are evaluated and passed to the first four integer parameters using `rcx`, `rdx`, `r8`, `r9` (Win64 calling convention). Additional support for >4 args via stack can be added later.
-- Nested and recursive calls are supported:
-```
-int z = Add(Mul(x, 2), y)
+public static void Main():
+    float f = Math.sqrt(2)
+    print "sqrt(2) = " + f
 ```
 
-### Strings, interpolation and concatenation
-- Strings: `"Hello world"`
-- Interpolation: use `${expression}` inside a string literal. Example:
-```
-print "x=${x} result=${Add(x, 2)}"
-```
-- The compiler parses `${...}` as a mini-expression using the same expression parser, so any expression is allowed inside.
-- Concatenation: `+` between strings or string variables performs allocation on the heap and concatenates both sides:
-```
-string s = "Hello" + " World"
-```
-- `print` behavior:
-  - `print "hello"` — literal with newline
-  - `print varName` — prints a variable (string or converted int)
-  - `print "x=${x}"` — prints interpolation
-- To include literal `${` or `$` or `{` in a string, escape or use `\{` or `\$` sequences in the source — the lexer handles escapes.
+Notes:
+- Inside `class Math:` functions are declared by name (no `Math.` prefix).
+- The compiler will register both `sqrt` and `Math.sqrt` so callers may use either.
+- Prefer class-based libs for organization and to avoid parse awkwardness.
 
-### Classes & access modifiers
-- Class declaration:
-```
-class Program:
-    private static int Add(int x):
-        return x + 1
-```
-- Methods are registered with their owner class. Access modifiers:
-  - `public`: callable from anywhere.
-  - `protected` / `private`: callable only from within the owning class (and protected could later be extended for subclasses).
-- `Main` inside any class is treated as the program entry `Main`.
+---
 
-### Standard library (import System)
-Import `System` enables the following helpers:
-- `exit(code)` — terminates the program (calls ExitProcess).
-- `str(expr)` — returns a pointer to a heap string representing an integer (wrapper around integer-to-string helper).
-- `math_abs(x)`, `math_max(a,b)`, `math_min(a,b)` — helper functions emitted inline.
-- `str_len(s)` — returns length of a string (stdlib helper).
+## Writing native/ASM-backed functions
+
+- Use `ASM:` blocks inside a function to emit raw assembly.
+- If the function's return type is `float`, you should produce the value in `xmm0` and then do `movq rax, xmm0` (or otherwise move the raw bits into `rax`). The compiler will treat the value in `rax` as the return bits and will place/stash them in the caller as appropriate.
+- The compiler automatically appends `jmp __ret_<func>` after an ASM block if it's the last statement in the function, so you don't need to write `return` in that case — the ASM block acts as the provider of the return value.
+- For integer returns, place the return value in `rax` as usual.
+
+Example:
+```ce
+class Fast:
+
+    float hypot(int x, int y):
+        ASM:
+            ; rcx = x, rdx = y
+            cvtsi2sd xmm0, rcx
+            cvtsi2sd xmm1, rdx
+            mulsd xmm0, xmm0
+            mulsd xmm1, xmm1
+            addsd xmm0, xmm1
+            sqrtsd xmm0, xmm0
+            movq rax, xmm0
+```
+
+---
+
+## Calling convention & codegen notes
+
+- Parameter passing:
+  - Integers/pointers: `rcx`, `rdx`, `r8`, `r9` for first four arguments (Windows x64 convention used here).
+  - Additional arguments are pushed onto the stack by the compiler (the compiler pushes evaluated args into `rax` then `push` and then pops into the register order).
+- Return values:
+  - Integers: raw integer in `rax`.
+  - Floats: expected in `xmm0` by `__printFloat`, but the compiler uses `movq rax, xmm0` between ASM and return so that `rax` holds the float bits for storage/return. The internal calling convention in generated code returns a float as raw bits in `rax` and the caller's code converts it to `xmm0` when needed for printing (the code generator handles this).
+- Labels: function labels are sanitized: `.` in function names is replaced by `_` in label names (e.g. `Math.sqrt` → `__fn_Math_sqrt`).
+- Heap: compiler uses an arena allocator exposed as `__heap_allocate` and `__heap_init`. Strings created by the compiler are allocated on the heap.
+
+---
+
+## Symbol resolution rules
+
+- Files are parsed and imports resolved recursively; each file produces a `CompilationUnit`.
+- Top-level functions are registered by name.
+- Class methods are registered as both `MethodName` and `ClassName.MethodName`.
+  - This allows `Factorial` declared inside `class Program` to be called by `Factorial(...)` or `Program.Factorial(...)`.
+- Access control:
+  - `public`, `private`, `protected` modifiers are tracked. Calls are validated at compile time; methods in the **same class** can call each other regardless of `private`/`protected` (this release relaxes access checks for same-class calls).
+- The compiler considers the following built-ins intrinsic and handled by the compiler: `exit`, `length`.
+
+---
+
+## Known limitations & migration notes
+
+- Float arithmetic operators (`+`, `-`, `*`, `/`) are not fully integrated into expression code emission. To produce floats you may rely on:
+  - Pure-C! implementations using integer arithmetic (slow/approximate), or
+  - ASM-backed functions that use SSE2 instructions.
+- `print` float formatting is rudimentary: prints with 3 decimal places (rounded/truncated based on `cvttsd2si` used in helper).
+- `AsmBlock` should be used with care: the code is emitted verbatim. Ensure your assembly preserves callee-saved registers (or rely on the function prologue/epilogue layout).
+- `length(...)` for arrays is limited; strings and ints supported.
+- No automatic floating-point promotion/conversions for arithmetic expressions — using float-returning functions in expressions will be detected by codegen and printed correctly, but mixing float/int arithmetic is limited.
+- Error messages have improved but may still be terse for complex type errors.
 
 ---
 
 ## Examples
 
-Hello world + interpolation:
+Math library (`Math.ce`):
 ```ce
-import System
+class Math:
 
-public static void Main():
-    int x = 5
-    print "hello ${x}"   // prints "hello 5" + newline
+    int abs(int n):
+        if n < 0:
+            return -n
+        return n
+
+    float sqrt(int x):
+        ASM:
+            cvtsi2sd xmm0, rcx
+            sqrtsd   xmm0, xmm0
+            movq     rax, xmm0
 ```
 
-Function, nested calls, local variables:
+Main program (`main.ce`):
 ```ce
+import Math
+
 class Program:
 
-    private static int Add(int a, int b):
-        return a + b
+    private static int Factorial(int n):
+        if n <= 1:
+            return 1
+        return n * Factorial(n - 1)
+
+    int Add(int o):
+        o += 5
+        o = Math.sqrt(o)      ; returns float, assignment will require float variable
+        return o              ; if function return type is float, ensure variable types match
 
     public static void Main():
-        int x = 2
-        int y = 3
-        int z = Add(x, Add(y, 4))
-        print "z=${z}"
+        float f = Math.sqrt(2)
+        print "sqrt(2) = " + f
 ```
 
-Arrays:
-```ce
-public static void Main():
-    int[] arr = new int[3]
-    arr[0] = 10
-    arr[1] = 20
-    print "arr[1]=${arr[1]}"
-```
-
-String concatenation:
-```ce
-public static void Main():
-    string a = "Hello"
-    string b = "World"
-    string c = a + " " + b
-    print "${c}"
-```
+Note: assign `Math.sqrt` result to a `float` variable (not shown above for `Add`, ensure types match).
 
 ---
 
-## Migration notes (important)
-
-The parser/AST/lexer changed significantly. If you're porting old `.ce` files or compiler extensions, note these changes:
-
-- AST:
-  - Expressions are now first-class (NumberLiteral, StringLiteralExpr, VariableExpr, BinaryExpr, UnaryExpr, CallExpr).
-  - VariableDeclaration.Init is an Expression (replaces old `Value` string + `InitCall`).
-  - AssignmentStatement.Value is an Expression.
-  - PrintStatement supports `Segments` (interpolation) instead of format strings using `{}`.
-  - ArrayDeclaration, ArrayAccess, ArrayAssignment nodes are new.
+## Developer notes (implementation pointers)
 
 - Parser:
-  - Expression parser (Pratt-style) is implemented. You can write full expressions in assignments, returns, conditionals, array sizes, and `${...}` interpolation.
-  - `print` interpolation uses `${expr}` to avoid accidental `{}` use. You requested `${x}` rather than `{x}` to avoid conflicts: use `${...}`.
-
-- Lexer:
-  - New tokens: `new`, `[`, `]`, `PercentEquals`, and improved string escapes.
-  - String interpolation parsing occurs in the parser by feeding the `${...}` substring back into the lexer+parser.
-
+  - Supports dotted identifier parsing for `Math.sqrt` calls and function declarations (via class registration).
+  - Lookaheads adjusted to accept `Type Identifier . Identifier` as a valid function header when inside class contexts.
+- Symbol table:
+  - Class members are entered both as plain names and `Class.Member` dotted names to support flexible calling.
 - Code generation:
-  - Locals are stack-allocated; function frames are pre-sized using `CountLocals` and aligned.
-  - A simple heap arena is provided via `heapBuf` / `__heap_alloc`. Strings and arrays use it.
-  - The integer-to-string helper and other helpers are emitted into the helpers section (below code) to avoid inline helper insertion.
-
-If you have existing code that used old syntax (e.g., `print "x={x}"`), change to `print "x=${x}"`.
-
----
-
-## Debugging & common errors
-
-- "Call to undefined function 'foo'": either the function doesn't exist or access rules block it. Remember that `private` methods are only callable from the same owner class.
-- "Undefined variable 'name'": variable used before declared or wrong scope (parameters of a different function).
-- NASM label relocation or "label changed during code generation": this likely indicates frame-size computation issues — ensure `CountLocals` logic matches your AST (we take maximum of branches).
-- If the generated assembly prints only part of expected output or prematurely jumps into helper code, ensure helpers are emitted into the `_helpers` section (the compiler emits helpers before function bodies).
-
-For better error messages, line numbers are present on tokens but not yet tied into AST nodes in all places. Adding line numbers to AST nodes is a recommended next change.
+  - Functions labeled using sanitized names (`.` → `_`).
+  - `AsmBlock` last-statement handling: compiler automatically emits `jmp __ret_<safeLabel>` so ASM blocks can act as return providers.
+  - `__printFloat` helper implemented in assembly and emitted into the helpers section.
+  - String equality implemented as byte-by-byte compare in generated assembly.
+  - For-loops support negative step determined at runtime.
+- Built-in/Intrinsic functions are minimal: `exit`, `length`. Everything else should be implemented in library `.ce` files.
 
 ---
 
-## Limitations & roadmap
-
-Current limitations:
-- Strings are stored as pointers (no managed GC). The heap is a bump allocator (arena) and is reset only by explicit helpers. This is safe for small programs but not a full GC.
-- Only integer arithmetic (and pseudo-floating via casted floats) — no IEEE floating-point register support yet.
-- Arrays store 8-byte values (ints/pointers). No typed runtime checks.
-- No method dispatch or instances: class fields are not per-instance—class bodies still map fields to global variables (future work).
-- Only first 4 function arguments are passed in registers; >4 not implemented.
-- Error messages could be more precise (line/column); this is planned.
-
-Planned improvements (next):
-- Real per-instance objects and member access
-- Proper GC (mark & sweep or generational)
-- Better error reporting with AST-located line/column
-- Full support for >4 arguments (stack-based)
-- Float support with XMM registers
+## Roadmap (next items)
+- Integrate full float arithmetic and expression emission (SSE2 path).
+- Improve float formatting (configurable precision, rounding).
+- Expand `length` to arrays and generic collections.
+- Add `var` type inference and richer type checking.
+- Better error messages and source mapping for ASM blocks.
 
 ---
