@@ -61,7 +61,7 @@ public class Parser
         if (Match(TokenType.Indent, TokenType.Dedent, TokenType.Newline))
             return null;
 
-        // prefix ++ --
+        // prefix ++ / --
         if (Check(TokenType.PlusPlus) || Check(TokenType.MinusMinus))
         {
             int    line = Peek().Line;
@@ -228,7 +228,6 @@ public class Parser
         if (Check(TokenType.FloatNumber))
             return new NumberLiteral { Value = (long)double.Parse(Advance().Value), Line = line };
 
-        // bool literals
         if (Check(TokenType.BoolLiteral))
         {
             bool val = Advance().Value == "true";
@@ -282,12 +281,6 @@ public class Parser
     }
 
     // ================================================================= condition
-    // Conditions use ParseAddSub for sides so comparison operators are never
-    // consumed by the expression parser.
-    // Supports:
-    //   if x == 5:         normal comparison
-    //   if b:              boolean variable (no operator)
-    //   if not b:          negated boolean
     private Condition ParseCondition()
     {
         int  line    = Peek().Line;
@@ -295,36 +288,19 @@ public class Parser
 
         var left = ParseAddSub();
 
-        // boolean condition — no comparison operator (e.g. "if b:")
+        // boolean condition — no comparison operator
         if (Check(TokenType.Colon) || Check(TokenType.Newline) || IsAtEnd())
-        {
-            return new Condition
-            {
-                Left    = left,
-                Op      = "bool",
-                Right   = null,
-                Negated = negated,
-                Line    = line
-            };
-        }
+            return new Condition { Left = left, Op = "bool", Right = null, Negated = negated, Line = line };
 
         string op    = ConsumeOperator();
         var    right = ParseAddSub();
 
-        // optional: and / or chaining
         if (Match(TokenType.And))
         {
             var    left2  = ParseAddSub();
             string op2    = ConsumeOperator();
             var    right2 = ParseAddSub();
-            return new Condition
-            {
-                Left    = left,
-                Op      = op + "&&" + op2,
-                Right   = right,
-                Negated = negated,
-                Line    = line
-            };
+            return new Condition { Left = left, Op = op + "&&" + op2, Right = right, Negated = negated, Line = line };
         }
 
         if (Match(TokenType.Or))
@@ -332,14 +308,7 @@ public class Parser
             var    left2  = ParseAddSub();
             string op2    = ConsumeOperator();
             var    right2 = ParseAddSub();
-            return new Condition
-            {
-                Left    = left,
-                Op      = op + "||" + op2,
-                Right   = right,
-                Negated = negated,
-                Line    = line
-            };
+            return new Condition { Left = left, Op = op + "||" + op2, Right = right, Negated = negated, Line = line };
         }
 
         return new Condition { Left = left, Op = op, Right = right, Negated = negated, Line = line };
@@ -356,10 +325,113 @@ public class Parser
         throw new Exception($"Expected comparison operator at line {Peek().Line}");
     }
 
-    // ---------------------------------------------------------------- lookaheads
+    // ================================================================= print
+    private PrintStatement ParsePrint()
+    {
+        int line = Previous().Line;
+
+        // print varName  (bare identifier, no quotes)
+        if (Check(TokenType.Identifier))
+            return new PrintStatement { VarName = Advance().Value, Line = line };
+
+        if (!Check(TokenType.StringLiteral))
+            throw new Exception($"Expected string literal or variable after print at line {line}");
+
+        string raw = Advance().Value;
+
+        // pure interpolation with no concat after — fast path
+        if (raw.Contains("${") && !Check(TokenType.Plus))
+            return new PrintStatement { Segments = ParseInterpolation(raw), Line = line };
+
+        // build expression from the string (handles interpolation internally)
+        Expression printExpr = BuildStringExpr(raw, line);
+
+        // consume any chained  + expr
+        while (Check(TokenType.Plus))
+        {
+            int opLine = Peek().Line;
+            Advance();
+            var right = ParseMulDiv();
+            printExpr = new BinaryExpr { Left = printExpr, Op = "+", Right = right, Line = opLine };
+        }
+
+        // plain string with no interpolation and no concat — Literal fast path
+        if (printExpr is StringLiteralExpr sle && !sle.Value.Contains("${"))
+            return new PrintStatement { Literal = sle.Value, Line = line };
+
+        return new PrintStatement
+        {
+            Segments = new List<PrintSegment> { new PrintSegment { Expr = printExpr } },
+            Line     = line
+        };
+    }
+
+    // Turn a raw string into an Expression.
+    // "hello ${x} world" → BinaryExpr chain
+    // "hello"            → StringLiteralExpr
+    private Expression BuildStringExpr(string raw, int line)
+    {
+        if (!raw.Contains("${"))
+            return new StringLiteralExpr { Value = raw, Line = line };
+
+        var segs = ParseInterpolation(raw);
+        if (segs.Count == 0)
+            return new StringLiteralExpr { Value = "", Line = line };
+
+        Expression result = SegmentToExpr(segs[0], line);
+        for (int i = 1; i < segs.Count; i++)
+            result = new BinaryExpr
+            {
+                Left  = result,
+                Op    = "+",
+                Right = SegmentToExpr(segs[i], line),
+                Line  = line
+            };
+        return result;
+    }
+
+    private Expression SegmentToExpr(PrintSegment seg, int line) =>
+        seg.Expr != null
+            ? seg.Expr
+            : new StringLiteralExpr { Value = seg.Text ?? "", Line = line };
+
+    private List<PrintSegment> ParseInterpolation(string raw)
+    {
+        var segments = new List<PrintSegment>();
+        int i = 0;
+
+        while (i < raw.Length)
+        {
+            int start = raw.IndexOf("${", i);
+            if (start == -1)
+            {
+                if (i < raw.Length)
+                    segments.Add(new PrintSegment { Text = raw.Substring(i) });
+                break;
+            }
+
+            if (start > i)
+                segments.Add(new PrintSegment { Text = raw.Substring(i, start - i) });
+
+            int end = raw.IndexOf('}', start + 2);
+            if (end == -1)
+                throw new Exception("Unterminated ${ in string interpolation");
+
+            string exprSrc = raw.Substring(start + 2, end - start - 2).Trim();
+            var exprTokens = new Cex.Lexer.Lexer(exprSrc).Tokenize();
+            var exprParser = new Parser(exprTokens);
+            segments.Add(new PrintSegment { Expr = exprParser.ParseExpression() });
+
+            i = end + 1;
+        }
+
+        return segments;
+    }
+
+    // ================================================================= lookaheads
     private bool IsFunctionDeclarationWithModifiers()
     {
-        int saved = _cur;
+        int  saved  = _cur;
         bool result = false;
         while (_cur < _tokens.Count &&
                (_tokens[_cur].Type is TokenType.Public or TokenType.Private
@@ -405,7 +477,7 @@ public class Parser
 
     private bool IsArrayDeclaration()
     {
-        int saved = _cur;
+        int  saved  = _cur;
         bool result = false;
         if (_cur < _tokens.Count && _tokens[_cur].Type == TokenType.Type)
         {
@@ -421,17 +493,16 @@ public class Parser
         return result;
     }
 
-    // ------------------------------------------------------------------ import
+    // ================================================================= statement parsers
     private ImportStatement ParseImport()
     {
-        int line = Previous().Line;
+        int    line   = Previous().Line;
         string module = "";
         while (!Check(TokenType.Newline) && !IsAtEnd())
             module += Advance().Value;
         return new ImportStatement { Module = module.Trim(), Line = line };
     }
 
-    // ------------------------------------------------------------------ function
     private FunctionDeclaration ParseFunctionDeclaration()
     {
         int    line   = Peek().Line;
@@ -474,7 +545,6 @@ public class Parser
         };
     }
 
-    // ------------------------------------------------------------------ array declaration
     private ArrayDeclaration ParseArrayDeclaration()
     {
         int    line     = Peek().Line;
@@ -491,7 +561,6 @@ public class Parser
         return new ArrayDeclaration { ElementType = elemType, Name = name, Size = size, Line = line };
     }
 
-    // ------------------------------------------------------------------ var decl
     private VariableDeclaration ParseVarDecl()
     {
         int    line = Previous().Line;
@@ -506,11 +575,10 @@ public class Parser
         return new VariableDeclaration { Type = type, Name = name, Init = init, Line = line };
     }
 
-    // ------------------------------------------------------------------ class
     private ClassDeclaration ParseClassDeclaration()
     {
-        int    line = Previous().Line;
-        string name = Consume(TokenType.Identifier, "Expected class name").Value;
+        int     line      = Previous().Line;
+        string  name      = Consume(TokenType.Identifier, "Expected class name").Value;
         string? baseClass = null;
         if (Check(TokenType.Less))
         {
@@ -524,7 +592,6 @@ public class Parser
         return new ClassDeclaration { Name = name, BaseClass = baseClass, Body = body, Line = line };
     }
 
-    // ------------------------------------------------------------------ if
     private IfStatement ParseIf()
     {
         int line = Previous().Line;
@@ -567,7 +634,6 @@ public class Parser
         };
     }
 
-    // ------------------------------------------------------------------ while
     private WhileStatement ParseWhile()
     {
         int line = Previous().Line;
@@ -577,7 +643,6 @@ public class Parser
         return new WhileStatement { Condition = cond, Body = ParseBlock(), Line = line };
     }
 
-    // ------------------------------------------------------------------ for
     private ForStatement ParseFor()
     {
         int    line    = Previous().Line;
@@ -588,17 +653,23 @@ public class Parser
         var to   = ParseExpression();
         Expression step = new NumberLiteral { Value = 1 };
         if (Check(TokenType.Identifier) && Peek().Value == "step")
-        { Advance(); step = ParseExpression(); }
+        {
+            Advance();
+            step = ParseExpression();
+        }
         Consume(TokenType.Colon, "Expected ':'");
         SkipNewlines();
         return new ForStatement
         {
-            VarName = varName, From = from, To = to,
-            Step    = step,    Body = ParseBlock(), Line = line
+            VarName = varName,
+            From    = from,
+            To      = to,
+            Step    = step,
+            Body    = ParseBlock(),
+            Line    = line
         };
     }
 
-    // ------------------------------------------------------------------ try
     private TryStatement ParseTry()
     {
         int line = Previous().Line;
@@ -632,12 +703,14 @@ public class Parser
 
         return new TryStatement
         {
-            TryBody = tryBody, CatchBody = catchBody,
-            FinallyBody = finallyBody, ExceptionVar = excVar, Line = line
+            TryBody      = tryBody,
+            CatchBody    = catchBody,
+            FinallyBody  = finallyBody,
+            ExceptionVar = excVar,
+            Line         = line
         };
     }
 
-    // ------------------------------------------------------------------ return
     private ReturnStatement ParseReturn()
     {
         int line = Previous().Line;
@@ -646,57 +719,6 @@ public class Parser
         return new ReturnStatement { Value = ParseExpression(), Line = line };
     }
 
-    // ------------------------------------------------------------------ print
-    private PrintStatement ParsePrint()
-    {
-        int line = Previous().Line;
-
-        if (Check(TokenType.Identifier))
-            return new PrintStatement { VarName = Advance().Value, Line = line };
-
-        string raw = Consume(TokenType.StringLiteral,
-            "Expected string literal or variable after print").Value;
-
-        if (raw.Contains("${"))
-            return new PrintStatement { Segments = ParseInterpolation(raw), Line = line };
-
-        return new PrintStatement { Literal = raw, Line = line };
-    }
-
-    private List<PrintSegment> ParseInterpolation(string raw)
-    {
-        var segments = new List<PrintSegment>();
-        int i = 0;
-
-        while (i < raw.Length)
-        {
-            int start = raw.IndexOf("${", i);
-            if (start == -1)
-            {
-                if (i < raw.Length)
-                    segments.Add(new PrintSegment { Text = raw.Substring(i) });
-                break;
-            }
-
-            if (start > i)
-                segments.Add(new PrintSegment { Text = raw.Substring(i, start - i) });
-
-            int end = raw.IndexOf('}', start + 2);
-            if (end == -1)
-                throw new Exception("Unterminated ${ in string interpolation");
-
-            string exprSrc = raw.Substring(start + 2, end - start - 2).Trim();
-            var exprTokens = new Cex.Lexer.Lexer(exprSrc).Tokenize();
-            var exprParser = new Parser(exprTokens);
-            segments.Add(new PrintSegment { Expr = exprParser.ParseExpression() });
-
-            i = end + 1;
-        }
-
-        return segments;
-    }
-
-    // ------------------------------------------------------------------ input
     private InputStatement ParseInput()
     {
         int line = Previous().Line;
@@ -707,49 +729,6 @@ public class Parser
         };
     }
 
-    // ------------------------------------------------------------------ block
-    private List<Expression> ParseBlock()
-    {
-        var stmts = new List<Expression>();
-        if (!Match(TokenType.Indent)) return stmts;
-
-        while (!Check(TokenType.Dedent) && !IsAtEnd())
-        {
-            SkipNewlines();
-            if (Check(TokenType.Dedent)) break;
-            var s = ParseStatement();
-            if (s != null) stmts.Add(s);
-        }
-
-        Match(TokenType.Dedent);
-        return stmts;
-    }
-
-    // ------------------------------------------------------------------ ASM
-    private AsmBlock ParseAsm()
-    {
-        int line = Previous().Line;
-        Consume(TokenType.Colon, "Expected ':' after ASM");
-        SkipNewlines();
-        var lines = new List<string>();
-        if (!Match(TokenType.Indent)) return new AsmBlock { Lines = lines, Line = line };
-
-        while (!Check(TokenType.Dedent) && !IsAtEnd())
-        {
-            SkipNewlines();
-            if (Check(TokenType.Dedent)) break;
-            var sb = new System.Text.StringBuilder();
-            while (!Check(TokenType.Newline) && !Check(TokenType.Dedent) && !IsAtEnd())
-            { sb.Append(Advance().Value); sb.Append(' '); }
-            string raw = sb.ToString().Trim();
-            if (raw.Length > 0) lines.Add(raw);
-        }
-
-        Match(TokenType.Dedent);
-        return new AsmBlock { Lines = lines, Line = line };
-    }
-
-    // ================================================================= helpers
     private CheckpointStatement ParseCheckpoint()
     {
         int line = Previous().Line;
@@ -770,6 +749,51 @@ public class Parser
         };
     }
 
+    // ================================================================= block / asm
+    private List<Expression> ParseBlock()
+    {
+        var stmts = new List<Expression>();
+        if (!Match(TokenType.Indent)) return stmts;
+
+        while (!Check(TokenType.Dedent) && !IsAtEnd())
+        {
+            SkipNewlines();
+            if (Check(TokenType.Dedent)) break;
+            var s = ParseStatement();
+            if (s != null) stmts.Add(s);
+        }
+
+        Match(TokenType.Dedent);
+        return stmts;
+    }
+
+    private AsmBlock ParseAsm()
+    {
+        int line = Previous().Line;
+        Consume(TokenType.Colon, "Expected ':' after ASM");
+        SkipNewlines();
+        var lines = new List<string>();
+        if (!Match(TokenType.Indent)) return new AsmBlock { Lines = lines, Line = line };
+
+        while (!Check(TokenType.Dedent) && !IsAtEnd())
+        {
+            SkipNewlines();
+            if (Check(TokenType.Dedent)) break;
+            var sb = new System.Text.StringBuilder();
+            while (!Check(TokenType.Newline) && !Check(TokenType.Dedent) && !IsAtEnd())
+            {
+                sb.Append(Advance().Value);
+                sb.Append(' ');
+            }
+            string raw = sb.ToString().Trim();
+            if (raw.Length > 0) lines.Add(raw);
+        }
+
+        Match(TokenType.Dedent);
+        return new AsmBlock { Lines = lines, Line = line };
+    }
+
+    // ================================================================= helpers
     private void SkipToNewline() { while (!IsAtEnd() && !Check(TokenType.Newline)) Advance(); }
     private void SkipNewlines()  { while (Check(TokenType.Newline)) Advance(); }
 

@@ -120,21 +120,14 @@ public class CodeGenerator
                 break;
             case UnaryExpr u:
                 EmitExpr(u.Operand);
-                if (u.Op == "-")
-                    _text.AppendLine("    neg  rax");
-                else if (u.Op == "not")
-                {
-                    _text.AppendLine("    test rax, rax");
-                    _text.AppendLine("    setz al");
-                    _text.AppendLine("    movzx rax, al");
-                }
+                if (u.Op == "-")        _text.AppendLine("    neg  rax");
+                else if (u.Op == "not") { _text.AppendLine("    test rax, rax"); _text.AppendLine("    setz al"); _text.AppendLine("    movzx rax, al"); }
                 break;
             case BinaryExpr b:
                 EmitBinary(b);
                 break;
             default:
-                throw new Exception(
-                    $"Cannot evaluate expression '{expr.GetType().Name}' at line {expr.Line}");
+                throw new Exception($"Cannot evaluate expression '{expr.GetType().Name}' at line {expr.Line}");
         }
     }
 
@@ -158,8 +151,7 @@ public class CodeGenerator
             case "-":  _text.AppendLine("    sub  rax, rbx"); break;
             case "*":  _text.AppendLine("    imul rax, rbx"); break;
             case "/":  _text.AppendLine("    cqo"); _text.AppendLine("    idiv rbx"); break;
-            case "%":  _text.AppendLine("    cqo"); _text.AppendLine("    idiv rbx");
-                       _text.AppendLine("    mov  rax, rdx"); break;
+            case "%":  _text.AppendLine("    cqo"); _text.AppendLine("    idiv rbx"); _text.AppendLine("    mov  rax, rdx"); break;
             case "==": EmitCmpResult("sete");  break;
             case "!=": EmitCmpResult("setne"); break;
             case "<":  EmitCmpResult("setl");  break;
@@ -167,62 +159,46 @@ public class CodeGenerator
             case "<=": EmitCmpResult("setle"); break;
             case ">=": EmitCmpResult("setge"); break;
             case "&&":
-                _text.AppendLine("    test rax, rax");
-                _text.AppendLine("    setnz al");
-                _text.AppendLine("    test rbx, rbx");
-                _text.AppendLine("    setnz bl");
-                _text.AppendLine("    and  al, bl");
-                _text.AppendLine("    movzx rax, al");
+                _text.AppendLine("    test rax, rax"); _text.AppendLine("    setnz al");
+                _text.AppendLine("    test rbx, rbx"); _text.AppendLine("    setnz bl");
+                _text.AppendLine("    and  al, bl");   _text.AppendLine("    movzx rax, al");
                 break;
             case "||":
-                _text.AppendLine("    or   rax, rbx");
-                _text.AppendLine("    setnz al");
-                _text.AppendLine("    movzx rax, al");
+                _text.AppendLine("    or   rax, rbx"); _text.AppendLine("    setnz al"); _text.AppendLine("    movzx rax, al");
                 break;
             default:
                 throw new Exception($"Unknown binary operator '{b.Op}' at line {b.Line}");
         }
     }
 
-    private void EmitCmpResult(string setInstr)
-    {
-        _text.AppendLine("    cmp  rax, rbx");
-        _text.AppendLine($"    {setInstr} al");
-        _text.AppendLine("    movzx rax, al");
-    }
+    private void EmitCmpResult(string s) { _text.AppendLine("    cmp  rax, rbx"); _text.AppendLine($"    {s} al"); _text.AppendLine("    movzx rax, al"); }
 
     private bool IsStringExpr(Expression e) =>
         e is StringLiteralExpr ||
-        (e is VariableExpr ve && GetVarType(ve.Name) == "string") ||
-        (e is BinaryExpr   be && be.Op == "+" && IsStringExpr(be.Left));
+        (e is VariableExpr ve && GetVarType(ve.Name) == "string");
 
-    // Convert any expr to a stable heap string ptr in rax.
-    // int → __intToStr → heap-copy. string → just EmitExpr.
+    // ---------------------------------------------------------------- EmitToStringPtr
+    // Result: rax = stable heap ptr to null-terminated string.
+    // Uses only push/pop — safe across nested calls.
     private void EmitToStringPtr(Expression expr)
     {
-        if (IsStringExpr(expr))
-        {
-            EmitExpr(expr);
-            return;
-        }
+        if (IsStringExpr(expr)) { EmitExpr(expr); return; }
 
         int id = _labelCount++;
-        EmitExpr(expr);                                       // rax = int
-        _text.AppendLine("    call __intToStr");              // rdx=ptr, ecx=len
-
-        // heap-copy digits so convBuf isn't clobbered later
-        // save rdx (src ptr) and ecx (len) on stack before any call
-        _text.AppendLine("    push rdx");                     // [rsp] = src ptr
+        EmitExpr(expr);                               // rax = int
+        _text.AppendLine("    call __intToStr");      // rdx=ptr ecx=len
+        // save src ptr before any call that might clobber rdx
+        _text.AppendLine("    push rdx");             // [rsp] = src ptr
         _text.AppendLine("    movzx rax, cx");
-        _text.AppendLine("    inc  rax");                     // len+1 for null
+        _text.AppendLine("    inc  rax");             // len+1
         _text.AppendLine("    mov  rcx, rax");
         _text.AppendLine("    sub  rsp, 40");
-        _text.AppendLine("    call __heap_alloc");            // rax = heap dest
+        _text.AppendLine("    call __heap_alloc");    // rax = dest
         _text.AppendLine("    add  rsp, 40");
-        // now: rax=dest, [rsp]=src ptr
-        _text.AppendLine("    push rax");                     // [rsp]=dest start, [rsp+8]=src ptr
-        _text.AppendLine("    mov  rdi, rax");                // dest walker
-        _text.AppendLine("    mov  rsi, [rsp+8]");           // src ptr
+        // stack: [rsp] = src ptr
+        _text.AppendLine("    push rax");             // [rsp]=dest_start [rsp+8]=src
+        _text.AppendLine("    mov  rdi, rax");        // dest walker
+        _text.AppendLine("    mov  rsi, [rsp+8]");   // src ptr
         _text.AppendLine($"__icpy_{id}:");
         _text.AppendLine("    mov  al, [rsi]");
         _text.AppendLine("    mov  [rdi], al");
@@ -232,58 +208,96 @@ public class CodeGenerator
         _text.AppendLine("    inc  rdi");
         _text.AppendLine($"    jmp  __icpy_{id}");
         _text.AppendLine($"__icpy_done_{id}:");
-        _text.AppendLine("    pop  rax");                     // rax = dest start
-        _text.AppendLine("    add  rsp, 8");                  // drop src ptr
+        _text.AppendLine("    pop  rax");             // dest_start
+        _text.AppendLine("    add  rsp, 8");          // drop src ptr
     }
 
-    // String concat using stack only — no callee-saved regs across calls.
+    // ---------------------------------------------------------------- EmitStringConcat
+    // Stack layout (grows downward, entries are 8 bytes each):
+    //   After push left, push right, push left (save), push rcx (len_left):
+    //     [rsp+0]  = len_left
+    //     [rsp+8]  = left_ptr  (save)
+    //     [rsp+16] = right_ptr (save)
+    //   After push rcx (len_right):
+    //     [rsp+0]  = len_right
+    //     [rsp+8]  = len_left
+    //     [rsp+16] = left_ptr
+    //     [rsp+24] = right_ptr
+    //   After push rax (dest_start):
+    //     [rsp+0]  = dest_start
+    //     [rsp+8]  = len_right
+    //     [rsp+16] = len_left
+    //     [rsp+24] = left_ptr
+    //     [rsp+32] = right_ptr
     private void EmitStringConcat(BinaryExpr b)
     {
         int id = _labelCount++;
 
-        // ── 1. left → heap string ptr → push
+        // 1. left → stable heap ptr
         EmitToStringPtr(b.Left);
-        _text.AppendLine("    push rax");                     // [rsp+0] = left ptr
+        _text.AppendLine("    push rax");             // save left ptr
 
-        // ── 2. right → heap string ptr → push
+        // 2. right → stable heap ptr
         EmitToStringPtr(b.Right);
-        _text.AppendLine("    push rax");                     // [rsp+0] = right ptr, [rsp+8] = left ptr
+        _text.AppendLine("    push rax");             // save right ptr
 
-        // ── 3. strlen(right)
+        // pop both into registers — avoid offset confusion from EmitToStringPtr's internal pushes
+        _text.AppendLine("    pop  rbx");             // rbx = right ptr
+        _text.AppendLine("    pop  rax");             // rax = left ptr
+
+        // re-push in known order: left then right
+        _text.AppendLine("    push rax");             // [rsp+8] after len_left push
+        _text.AppendLine("    push rbx");             // [rsp+0] right_ptr (temp, will be displaced)
+
+        // Actually simplest: just keep them in registers and push lengths separately.
+        // Restart with clean layout:
+        _text.AppendLine("    pop  rbx");             // rbx = right ptr
+        _text.AppendLine("    pop  rax");             // rax = left ptr  (back to registers)
+
+        // strlen(left) → rcx, no calls needed
         _text.AppendLine("    mov  rsi, rax");
         _text.AppendLine("    xor  rcx, rcx");
-        _text.AppendLine($"__slen_r_{id}:");
-        _text.AppendLine($"    cmp  byte [rsi+rcx], 0");
-        _text.AppendLine($"    je   __slen_r_done_{id}");
-        _text.AppendLine("    inc  rcx");
-        _text.AppendLine($"    jmp  __slen_r_{id}");
-        _text.AppendLine($"__slen_r_done_{id}:");
-        _text.AppendLine("    push rcx");                     // [rsp+0]=len_right, [rsp+8]=right, [rsp+16]=left
-
-        // ── 4. strlen(left)
-        _text.AppendLine("    mov  rsi, [rsp+16]");
-        _text.AppendLine("    xor  rcx, rcx");
         _text.AppendLine($"__slen_l_{id}:");
-        _text.AppendLine($"    cmp  byte [rsi+rcx], 0");
+        _text.AppendLine("    cmp  byte [rsi+rcx], 0");
         _text.AppendLine($"    je   __slen_l_done_{id}");
         _text.AppendLine("    inc  rcx");
         _text.AppendLine($"    jmp  __slen_l_{id}");
         _text.AppendLine($"__slen_l_done_{id}:");
-        _text.AppendLine("    push rcx");                     // [rsp+0]=len_left, [rsp+8]=len_right, [rsp+16]=right, [rsp+24]=left
+        // rcx = len_left, rax = left ptr, rbx = right ptr
 
-        // ── 5. alloc len_left + len_right + 1
-        _text.AppendLine("    mov  rax, [rsp]");              // len_left
-        _text.AppendLine("    add  rax, [rsp+8]");            // + len_right
-        _text.AppendLine("    inc  rax");                     // + null
-        _text.AppendLine("    mov  rcx, rax");
+        // strlen(right) → rdx, no calls needed
+        _text.AppendLine("    mov  rsi, rbx");
+        _text.AppendLine("    xor  rdx, rdx");
+        _text.AppendLine($"__slen_r_{id}:");
+        _text.AppendLine("    cmp  byte [rsi+rdx], 0");
+        _text.AppendLine($"    je   __slen_r_done_{id}");
+        _text.AppendLine("    inc  rdx");
+        _text.AppendLine($"    jmp  __slen_r_{id}");
+        _text.AppendLine($"__slen_r_done_{id}:");
+        // rcx=len_left, rdx=len_right, rax=left_ptr, rbx=right_ptr
+
+        // save all four on stack before the call
+        _text.AppendLine("    push rax");             // [rsp+24] left_ptr
+        _text.AppendLine("    push rbx");             // [rsp+16] right_ptr
+        _text.AppendLine("    push rcx");             // [rsp+8]  len_left
+        _text.AppendLine("    push rdx");             // [rsp+0]  len_right
+
+        // alloc len_left + len_right + 1
+        _text.AppendLine("    mov  rcx, [rsp]");      // len_right
+        _text.AppendLine("    add  rcx, [rsp+8]");    // + len_left
+        _text.AppendLine("    inc  rcx");
         _text.AppendLine("    sub  rsp, 40");
-        _text.AppendLine("    call __heap_alloc");
+        _text.AppendLine("    call __heap_alloc");    // rax = dest
         _text.AppendLine("    add  rsp, 40");
-        _text.AppendLine("    push rax");                     // [rsp+0]=dest, [rsp+8]=len_left, [rsp+16]=len_right, [rsp+24]=right, [rsp+32]=left
 
-        // ── 6. copy left → dest
-        _text.AppendLine("    mov  rdi, rax");                // dest walker
-        _text.AppendLine("    mov  rsi, [rsp+32]");           // left ptr
+        // stack: [rsp+0]=len_right [rsp+8]=len_left [rsp+16]=right_ptr [rsp+24]=left_ptr
+        _text.AppendLine("    push rax");             // [rsp+0]=dest_start
+
+        // stack: [rsp+0]=dest [rsp+8]=len_right [rsp+16]=len_left [rsp+24]=right_ptr [rsp+32]=left_ptr
+
+        // copy left → dest
+        _text.AppendLine("    mov  rdi, rax");        // dest walker
+        _text.AppendLine("    mov  rsi, [rsp+32]");   // left_ptr
         _text.AppendLine($"__scat_l_{id}:");
         _text.AppendLine("    mov  al, [rsi]");
         _text.AppendLine("    test al, al");
@@ -293,9 +307,9 @@ public class CodeGenerator
         _text.AppendLine("    inc  rdi");
         _text.AppendLine($"    jmp  __scat_l_{id}");
 
-        // ── 7. copy right → dest
+        // copy right → dest
         _text.AppendLine($"__scat_m_{id}:");
-        _text.AppendLine("    mov  rsi, [rsp+24]");           // right ptr
+        _text.AppendLine("    mov  rsi, [rsp+24]");   // right_ptr
         _text.AppendLine($"__scat_r_{id}:");
         _text.AppendLine("    mov  al, [rsi]");
         _text.AppendLine("    mov  [rdi], al");
@@ -305,10 +319,10 @@ public class CodeGenerator
         _text.AppendLine("    inc  rdi");
         _text.AppendLine($"    jmp  __scat_r_{id}");
 
-        // ── 8. return dest start, clean stack (5 qwords = 40 bytes)
+        // return dest_start, clean 5 slots (40 bytes)
         _text.AppendLine($"__scat_done_{id}:");
-        _text.AppendLine("    pop  rax");                     // dest start
-        _text.AppendLine("    add  rsp, 32");                 // drop len_left, len_right, right, left
+        _text.AppendLine("    pop  rax");             // dest_start
+        _text.AppendLine("    add  rsp, 32");         // drop len_right, len_left, right_ptr, left_ptr
     }
 
     private void EmitStrLen(string ptrReg, string outReg)
@@ -366,11 +380,7 @@ public class CodeGenerator
         if (isLocal)
         {
             int offset = _scope.Declare(v.Name, v.Type);
-            if (v.Init == null)
-            {
-                _text.AppendLine($"    mov  qword [rbp{offset}], 0");
-                return;
-            }
+            if (v.Init == null) { _text.AppendLine($"    mov  qword [rbp{offset}], 0"); return; }
             EmitExpr(v.Init);
             _text.AppendLine($"    mov  qword [rbp{offset}], rax  ; {v.Name}");
         }
@@ -387,10 +397,20 @@ public class CodeGenerator
     {
         if (p.Segments != null)
         {
-            for (int i = 0; i < p.Segments.Count; i++)
+            // flatten segments — expand any BinaryExpr(+) string concat into sub-segments
+            var flat = new List<PrintSegment>();
+            foreach (var seg in p.Segments)
             {
-                var  seg    = p.Segments[i];
-                bool isLast = i == p.Segments.Count - 1;
+                if (seg.Expr != null)
+                    FlattenToSegments(seg.Expr, flat);
+                else
+                    flat.Add(seg);
+            }
+
+            for (int i = 0; i < flat.Count; i++)
+            {
+                var  seg    = flat[i];
+                bool isLast = i == flat.Count - 1;
 
                 if (seg.Text != null)
                 {
@@ -400,14 +420,23 @@ public class CodeGenerator
                 }
                 else if (seg.Expr != null)
                 {
-                    EmitToStringPtr(seg.Expr);
-                    _text.AppendLine("    mov  rdx, rax");
-                    if (isLast) EmitWriteStringRdxNewline();
-                    else        EmitWriteConsoleRdx();
+                    if (IsStringExpr(seg.Expr))
+                    {
+                        EmitExpr(seg.Expr);
+                        _text.AppendLine("    mov  rdx, rax");
+                        if (isLast) EmitWriteStringRdxNewline();
+                        else        EmitWriteConsoleRdx();
+                    }
+                    else
+                    {
+                        // int — print directly, no heap alloc needed
+                        EmitExpr(seg.Expr);
+                        EmitWriteInt(addNewline: isLast);
+                    }
                 }
             }
 
-            if (p.Segments.Count == 0)
+            if (flat.Count == 0)
                 EmitWriteConsole(GetOrAddString("", newline: true), 1);
             return;
         }
@@ -423,17 +452,29 @@ public class CodeGenerator
         if (p.VarName != null)
         {
             string type = GetVarType(p.VarName);
-            if (type == "string")
-            {
-                LoadVar(p.VarName, "rdx");
-                EmitWriteStringRdxNewline();
-            }
-            else
-            {
-                LoadVar(p.VarName, "rax");
-                EmitWriteInt(addNewline: true);
-            }
+            if (type == "string") { LoadVar(p.VarName, "rdx"); EmitWriteStringRdxNewline(); }
+            else                  { LoadVar(p.VarName, "rax"); EmitWriteInt(addNewline: true); }
         }
+    }
+
+    // Recursively flatten "a" + b + c into individual PrintSegments
+    private void FlattenToSegments(Expression expr, List<PrintSegment> out_segs)
+    {
+        if (expr is BinaryExpr { Op: "+" } b)
+        {
+            FlattenToSegments(b.Left,  out_segs);
+            FlattenToSegments(b.Right, out_segs);
+            return;
+        }
+
+        if (expr is StringLiteralExpr s)
+        {
+            if (s.Value.Length > 0)
+                out_segs.Add(new PrintSegment { Text = s.Value });
+            return;
+        }
+
+        out_segs.Add(new PrintSegment { Expr = expr });
     }
 
     private void EmitInput(InputStatement inp)
@@ -448,20 +489,10 @@ public class CodeGenerator
         _text.AppendLine("    mov  qword [rsp+32], 0");
         _text.AppendLine("    call ReadConsoleA");
         _text.AppendLine("    add  rsp, 40");
-
         EmitTrimInputBuffer();
-
         string type = GetVarType(inp.VarName);
-        if (type is "int" or "float")
-        {
-            EmitStrToInt();
-            StoreVar(inp.VarName, "rax");
-        }
-        else
-        {
-            _text.AppendLine("    lea  rax, [rel inputChar]");
-            StoreVar(inp.VarName, "rax");
-        }
+        if (type is "int" or "float") { EmitStrToInt(); StoreVar(inp.VarName, "rax"); }
+        else { _text.AppendLine("    lea  rax, [rel inputChar]"); StoreVar(inp.VarName, "rax"); }
     }
 
     private void EmitTrimInputBuffer()
@@ -497,36 +528,24 @@ public class CodeGenerator
     {
         int    id     = _labelCount++;
         string lblEnd = $"__endif_{id}";
-
         string firstFalse = i.ElseIfs.Count > 0    ? $"__elseif_{id}_0"
-                          : i.ElseBranch.Count > 0 ? $"__else_{id}"
-                                                    : lblEnd;
-
+                          : i.ElseBranch.Count > 0 ? $"__else_{id}" : lblEnd;
         EmitConditionJump(i.Condition, firstFalse);
-        _scope.EnterBlock();
-        foreach (var e in i.ThenBranch) Emit(e);
-        _scope.ExitBlock();
+        _scope.EnterBlock(); foreach (var e in i.ThenBranch) Emit(e); _scope.ExitBlock();
         _text.AppendLine($"    jmp {lblEnd}");
-
         for (int k = 0; k < i.ElseIfs.Count; k++)
         {
             string nextLbl = k + 1 < i.ElseIfs.Count ? $"__elseif_{id}_{k + 1}"
-                           : i.ElseBranch.Count > 0  ? $"__else_{id}"
-                                                      : lblEnd;
+                           : i.ElseBranch.Count > 0  ? $"__else_{id}" : lblEnd;
             _text.AppendLine($"__elseif_{id}_{k}:");
             EmitConditionJump(i.ElseIfs[k].Condition, nextLbl);
-            _scope.EnterBlock();
-            foreach (var e in i.ElseIfs[k].Body) Emit(e);
-            _scope.ExitBlock();
+            _scope.EnterBlock(); foreach (var e in i.ElseIfs[k].Body) Emit(e); _scope.ExitBlock();
             _text.AppendLine($"    jmp {lblEnd}");
         }
-
         if (i.ElseBranch.Count > 0)
         {
             _text.AppendLine($"__else_{id}:");
-            _scope.EnterBlock();
-            foreach (var e in i.ElseBranch) Emit(e);
-            _scope.ExitBlock();
+            _scope.EnterBlock(); foreach (var e in i.ElseBranch) Emit(e); _scope.ExitBlock();
         }
         _text.AppendLine($"__endif_{id}:");
     }
@@ -536,13 +555,10 @@ public class CodeGenerator
         int    id       = _labelCount++;
         string lblStart = $"__while_{id}";
         string lblEnd   = $"__endwhile_{id}";
-
         _loopLabels.Push((lblEnd, lblStart));
         _text.AppendLine($"{lblStart}:");
         EmitConditionJump(w.Condition, lblEnd);
-        _scope.EnterBlock();
-        foreach (var e in w.Body) Emit(e);
-        _scope.ExitBlock();
+        _scope.EnterBlock(); foreach (var e in w.Body) Emit(e); _scope.ExitBlock();
         _text.AppendLine($"    jmp {lblStart}");
         _text.AppendLine($"{lblEnd}:");
         _loopLabels.Pop();
@@ -554,11 +570,9 @@ public class CodeGenerator
         string lblStart    = $"__for_{id}";
         string lblContinue = $"__forcont_{id}";
         string lblEnd      = $"__endfor_{id}";
-
         int offset = _scope.Declare(f.VarName, "int");
         EmitExpr(f.From);
         _text.AppendLine($"    mov  qword [rbp{offset}], rax");
-
         _loopLabels.Push((lblEnd, lblContinue));
         _text.AppendLine($"{lblStart}:");
         _text.AppendLine($"    mov  rax, [rbp{offset}]");
@@ -566,11 +580,7 @@ public class CodeGenerator
         _text.AppendLine("    mov  rbx, rax");
         _text.AppendLine($"    cmp  qword [rbp{offset}], rbx");
         _text.AppendLine($"    jge  {lblEnd}");
-
-        _scope.EnterBlock();
-        foreach (var e in f.Body) Emit(e);
-        _scope.ExitBlock();
-
+        _scope.EnterBlock(); foreach (var e in f.Body) Emit(e); _scope.ExitBlock();
         _text.AppendLine($"{lblContinue}:");
         EmitExpr(f.Step);
         _text.AppendLine($"    add  qword [rbp{offset}], rax");
@@ -583,19 +593,12 @@ public class CodeGenerator
     {
         int    id         = _labelCount++;
         string lblFinally = $"__finally_{id}";
-
-        _scope.EnterBlock();
-        foreach (var e in t.TryBody) Emit(e);
-        _scope.ExitBlock();
+        _scope.EnterBlock(); foreach (var e in t.TryBody) Emit(e); _scope.ExitBlock();
         _text.AppendLine($"    jmp {lblFinally}");
         _text.AppendLine($"__catch_{id}:");
-        _scope.EnterBlock();
-        foreach (var e in t.CatchBody) Emit(e);
-        _scope.ExitBlock();
+        _scope.EnterBlock(); foreach (var e in t.CatchBody) Emit(e); _scope.ExitBlock();
         _text.AppendLine($"{lblFinally}:");
-        _scope.EnterBlock();
-        foreach (var e in t.FinallyBody) Emit(e);
-        _scope.ExitBlock();
+        _scope.EnterBlock(); foreach (var e in t.FinallyBody) Emit(e); _scope.ExitBlock();
     }
 
     private void EmitFunctionBody(FunctionDeclaration fn)
@@ -610,10 +613,9 @@ public class CodeGenerator
         _text.AppendLine("    push rbp");
         _text.AppendLine("    mov  rbp, rsp");
 
-        int localCount = fn.Parameters.Count + CountLocals(fn.Body);
-        localCount     = Math.Max(localCount, 4);
+        int localCount = Math.Max(fn.Parameters.Count + CountLocals(fn.Body), 4);
         int frameSize  = (localCount * 8 + 15) & ~15;
-        _text.AppendLine($"    sub  rsp, dword {frameSize}");
+        _text.AppendLine($"    sub  rsp, {frameSize}");      // ← no "dword"
 
         string[] paramRegs = { "rcx", "rdx", "r8", "r9" };
         for (int i = 0; i < fn.Parameters.Count && i < 4; i++)
@@ -625,7 +627,7 @@ public class CodeGenerator
         foreach (var e in fn.Body) Emit(e);
 
         _text.AppendLine($"{retLabel}:");
-        _text.AppendLine($"    add  rsp, dword {frameSize}");
+        _text.AppendLine($"    add  rsp, {frameSize}");      // ← no "dword"
         _text.AppendLine("    pop  rbp");
         _text.AppendLine("    ret");
         _text.AppendLine();
@@ -638,26 +640,15 @@ public class CodeGenerator
     private void EmitCallExpr(CallExpr fc, string resultReg)
     {
         if (EmitStdLibCall(fc, resultReg)) return;
-
         if (!_symbols.FunctionExists(fc.Name))
             throw new Exception($"Call to undefined function '{fc.Name}' at line {fc.Line}");
-
         string[] paramRegs = { "rcx", "rdx", "r8", "r9" };
-
-        for (int i = fc.Args.Count - 1; i >= 0; i--)
-        {
-            EmitExpr(fc.Args[i]);
-            _text.AppendLine("    push rax");
-        }
-        for (int i = 0; i < fc.Args.Count && i < 4; i++)
-            _text.AppendLine($"    pop  {paramRegs[i]}");
-
+        for (int i = fc.Args.Count - 1; i >= 0; i--) { EmitExpr(fc.Args[i]); _text.AppendLine("    push rax"); }
+        for (int i = 0; i < fc.Args.Count && i < 4; i++) _text.AppendLine($"    pop  {paramRegs[i]}");
         _text.AppendLine("    sub  rsp, 40");
         _text.AppendLine($"    call __fn_{fc.Name}");
         _text.AppendLine("    add  rsp, 40");
-
-        if (resultReg != "rax")
-            _text.AppendLine($"    mov  {resultReg}, rax");
+        if (resultReg != "rax") _text.AppendLine($"    mov  {resultReg}, rax");
     }
 
     private bool EmitStdLibCall(CallExpr fc, string resultReg)
@@ -665,64 +656,15 @@ public class CodeGenerator
         switch (fc.Name)
         {
             case "exit":
-                if (fc.Args.Count > 0) EmitExpr(fc.Args[0]);
-                else _text.AppendLine("    mov  rax, 0");
-                _text.AppendLine("    mov  rcx, rax");
-                _text.AppendLine("    sub  rsp, 40");
-                _text.AppendLine("    call ExitProcess");
-                _text.AppendLine("    add  rsp, 40");
+                if (fc.Args.Count > 0) EmitExpr(fc.Args[0]); else _text.AppendLine("    mov  rax, 0");
+                _text.AppendLine("    mov  rcx, rax"); _text.AppendLine("    sub  rsp, 40");
+                _text.AppendLine("    call ExitProcess"); _text.AppendLine("    add  rsp, 40");
                 return true;
-            case "math_abs":
-            {
-                int id = _labelCount++;
-                EmitExpr(fc.Args[0]);
-                _text.AppendLine("    test rax, rax");
-                _text.AppendLine($"    jns  __abs_{id}");
-                _text.AppendLine("    neg  rax");
-                _text.AppendLine($"__abs_{id}:");
-                if (resultReg != "rax") _text.AppendLine($"    mov  {resultReg}, rax");
-                return true;
-            }
-            case "math_max":
-            {
-                int id = _labelCount++;
-                EmitExpr(fc.Args[0]); _text.AppendLine("    push rax");
-                EmitExpr(fc.Args[1]); _text.AppendLine("    mov  rbx, rax");
-                _text.AppendLine("    pop  rax");
-                _text.AppendLine("    cmp  rax, rbx");
-                _text.AppendLine($"    jge  __max_{id}");
-                _text.AppendLine("    mov  rax, rbx");
-                _text.AppendLine($"__max_{id}:");
-                if (resultReg != "rax") _text.AppendLine($"    mov  {resultReg}, rax");
-                return true;
-            }
-            case "math_min":
-            {
-                int id = _labelCount++;
-                EmitExpr(fc.Args[0]); _text.AppendLine("    push rax");
-                EmitExpr(fc.Args[1]); _text.AppendLine("    mov  rbx, rax");
-                _text.AppendLine("    pop  rax");
-                _text.AppendLine("    cmp  rax, rbx");
-                _text.AppendLine($"    jle  __min_{id}");
-                _text.AppendLine("    mov  rax, rbx");
-                _text.AppendLine($"__min_{id}:");
-                if (resultReg != "rax") _text.AppendLine($"    mov  {resultReg}, rax");
-                return true;
-            }
-            case "str_len":
-            {
-                EmitExpr(fc.Args[0]);
-                _text.AppendLine("    mov  rsi, rax");
-                EmitStrLen("rsi", "rax");
-                if (resultReg != "rax") _text.AppendLine($"    mov  {resultReg}, rax");
-                return true;
-            }
-            case "str":
-            {
-                EmitToStringPtr(fc.Args[0]);
-                if (resultReg != "rax") _text.AppendLine($"    mov  {resultReg}, rax");
-                return true;
-            }
+            case "math_abs": { int id=_labelCount++; EmitExpr(fc.Args[0]); _text.AppendLine("    test rax, rax"); _text.AppendLine($"    jns  __abs_{id}"); _text.AppendLine("    neg  rax"); _text.AppendLine($"__abs_{id}:"); if (resultReg!="rax") _text.AppendLine($"    mov  {resultReg}, rax"); return true; }
+            case "math_max": { int id=_labelCount++; EmitExpr(fc.Args[0]); _text.AppendLine("    push rax"); EmitExpr(fc.Args[1]); _text.AppendLine("    mov  rbx, rax"); _text.AppendLine("    pop  rax"); _text.AppendLine("    cmp  rax, rbx"); _text.AppendLine($"    jge  __max_{id}"); _text.AppendLine("    mov  rax, rbx"); _text.AppendLine($"__max_{id}:"); if (resultReg!="rax") _text.AppendLine($"    mov  {resultReg}, rax"); return true; }
+            case "math_min": { int id=_labelCount++; EmitExpr(fc.Args[0]); _text.AppendLine("    push rax"); EmitExpr(fc.Args[1]); _text.AppendLine("    mov  rbx, rax"); _text.AppendLine("    pop  rax"); _text.AppendLine("    cmp  rax, rbx"); _text.AppendLine($"    jle  __min_{id}"); _text.AppendLine("    mov  rax, rbx"); _text.AppendLine($"__min_{id}:"); if (resultReg!="rax") _text.AppendLine($"    mov  {resultReg}, rax"); return true; }
+            case "str_len": { EmitExpr(fc.Args[0]); _text.AppendLine("    mov  rsi, rax"); EmitStrLen("rsi","rax"); if (resultReg!="rax") _text.AppendLine($"    mov  {resultReg}, rax"); return true; }
+            case "str": { EmitToStringPtr(fc.Args[0]); if (resultReg!="rax") _text.AppendLine($"    mov  {resultReg}, rax"); return true; }
             default: return false;
         }
     }
@@ -730,51 +672,25 @@ public class CodeGenerator
     private void EmitReturn(ReturnStatement r)
     {
         if (r.Value != null) EmitExpr(r.Value);
-        if (_currentFuncRetLabel != null)
-            _text.AppendLine($"    jmp {_currentFuncRetLabel}");
-        else
-        {
-            _text.AppendLine("    mov  rcx, 0");
-            _text.AppendLine("    call ExitProcess");
-        }
+        if (_currentFuncRetLabel != null) _text.AppendLine($"    jmp {_currentFuncRetLabel}");
+        else { _text.AppendLine("    mov  rcx, 0"); _text.AppendLine("    call ExitProcess"); }
     }
 
-    private void EmitBreak()
-    {
-        if (_loopLabels.Count == 0) throw new Exception("break outside loop");
-        _text.AppendLine($"    jmp {_loopLabels.Peek().breakLbl}");
-    }
-
-    private void EmitContinue()
-    {
-        if (_loopLabels.Count == 0) throw new Exception("continue outside loop");
-        _text.AppendLine($"    jmp {_loopLabels.Peek().continueLbl}");
-    }
+    private void EmitBreak()    { if (_loopLabels.Count==0) throw new Exception("break outside loop");    _text.AppendLine($"    jmp {_loopLabels.Peek().breakLbl}"); }
+    private void EmitContinue() { if (_loopLabels.Count==0) throw new Exception("continue outside loop"); _text.AppendLine($"    jmp {_loopLabels.Peek().continueLbl}"); }
 
     private void EmitAssignment(AssignmentStatement a)
     {
         switch (a.Operator)
         {
-            case "++": LoadVar(a.VarName, "rax"); _text.AppendLine("    inc  rax"); StoreVar(a.VarName, "rax"); break;
-            case "--": LoadVar(a.VarName, "rax"); _text.AppendLine("    dec  rax"); StoreVar(a.VarName, "rax"); break;
-            case "=":
-                EmitExpr(a.Value!);
-                StoreVar(a.VarName, "rax");
-                break;
+            case "++": LoadVar(a.VarName,"rax"); _text.AppendLine("    inc  rax"); StoreVar(a.VarName,"rax"); break;
+            case "--": LoadVar(a.VarName,"rax"); _text.AppendLine("    dec  rax"); StoreVar(a.VarName,"rax"); break;
+            case "=":  EmitExpr(a.Value!); StoreVar(a.VarName,"rax"); break;
             default:
-                LoadVar(a.VarName, "rax");
-                _text.AppendLine("    push rax");
-                EmitExpr(a.Value!);
-                _text.AppendLine("    mov  rbx, rax");
-                _text.AppendLine("    pop  rax");
-                EmitArith(a.Operator.TrimEnd('=') switch
-                {
-                    "+" => "+", "-" => "-", "*" => "*",
-                    "/" => "/", "%" => "%",
-                    _   => throw new Exception($"Unknown operator: {a.Operator}")
-                });
-                StoreVar(a.VarName, "rax");
-                break;
+                LoadVar(a.VarName,"rax"); _text.AppendLine("    push rax");
+                EmitExpr(a.Value!); _text.AppendLine("    mov  rbx, rax"); _text.AppendLine("    pop  rax");
+                EmitArith(a.Operator.TrimEnd('=') switch { "+"=>"+","-"=>"-","*"=>"*","/"=>"/","%"=>"%", _=>throw new Exception($"Unknown op: {a.Operator}") });
+                StoreVar(a.VarName,"rax"); break;
         }
     }
 
@@ -782,57 +698,28 @@ public class CodeGenerator
     {
         if (c.Op == "bool")
         {
-            EmitExpr(c.Left);
-            _text.AppendLine("    test rax, rax");
+            EmitExpr(c.Left); _text.AppendLine("    test rax, rax");
             _text.AppendLine($"    {(c.Negated ? "jnz" : "jz")}  {falseLabel}");
             return;
         }
-
-        EmitExpr(c.Left);
-        _text.AppendLine("    push rax");
-        EmitExpr(c.Right!);
-        _text.AppendLine("    mov  rbx, rax");
-        _text.AppendLine("    pop  rax");
+        EmitExpr(c.Left); _text.AppendLine("    push rax");
+        EmitExpr(c.Right!); _text.AppendLine("    mov  rbx, rax"); _text.AppendLine("    pop  rax");
         _text.AppendLine("    cmp  rax, rbx");
-
-        string baseOp = c.Op.Contains("&&") ? c.Op.Split("&&")[0]
-                      : c.Op.Contains("||") ? c.Op.Split("||")[0]
-                      : c.Op;
-
-        string jmp = baseOp switch
-        {
-            "==" => "jne", "!=" => "je",
-            "<"  => "jge", ">"  => "jle",
-            "<=" => "jg",  ">=" => "jl",
-            _    => throw new Exception($"Unknown condition op '{baseOp}' at line {c.Line}")
-        };
-
-        if (c.Negated) jmp = jmp switch
-        {
-            "jne" => "je",  "je"  => "jne",
-            "jge" => "jl",  "jl"  => "jge",
-            "jle" => "jg",  "jg"  => "jle",
-            _     => jmp
-        };
-
+        string baseOp = c.Op.Contains("&&") ? c.Op.Split("&&")[0] : c.Op.Contains("||") ? c.Op.Split("||")[0] : c.Op;
+        string jmp = baseOp switch { "=="=>"jne","!="=>"je","<"=>"jge",">"=>"jle","<="=>"jg",">="=>"jl", _=>throw new Exception($"Unknown op '{baseOp}' at line {c.Line}") };
+        if (c.Negated) jmp = jmp switch { "jne"=>"je","je"=>"jne","jge"=>"jl","jl"=>"jge","jle"=>"jg","jg"=>"jle", _=>jmp };
         _text.AppendLine($"    {jmp}  {falseLabel}");
     }
 
     private void EmitPause()
     {
         const string txt = "Press Enter to exit...";
-        string lbl = GetOrAddString(txt, newline: true);
-        EmitWriteConsole(lbl, Encoding.ASCII.GetByteCount(txt) + 1);
-        _text.AppendLine("    sub  rsp, 40");
-        _text.AppendLine("    mov  rcx, -10");
-        _text.AppendLine("    call GetStdHandle");
-        _text.AppendLine("    mov  rcx, rax");
-        _text.AppendLine("    lea  rdx, [rel inputChar]");
-        _text.AppendLine("    mov  r8d, 2");
-        _text.AppendLine("    lea  r9,  [rel written]");
-        _text.AppendLine("    mov  qword [rsp+32], 0");
-        _text.AppendLine("    call ReadConsoleA");
-        _text.AppendLine("    add  rsp, 40");
+        EmitWriteConsole(GetOrAddString(txt, newline: true), Encoding.ASCII.GetByteCount(txt) + 1);
+        _text.AppendLine("    sub  rsp, 40"); _text.AppendLine("    mov  rcx, -10");
+        _text.AppendLine("    call GetStdHandle"); _text.AppendLine("    mov  rcx, rax");
+        _text.AppendLine("    lea  rdx, [rel inputChar]"); _text.AppendLine("    mov  r8d, 2");
+        _text.AppendLine("    lea  r9,  [rel written]"); _text.AppendLine("    mov  qword [rsp+32], 0");
+        _text.AppendLine("    call ReadConsoleA"); _text.AppendLine("    add  rsp, 40");
     }
 
     // ================================================================= write helpers
@@ -851,11 +738,11 @@ public class CodeGenerator
         _text.AppendLine("    add  rsp, 40");
     }
 
-    // rdx = string ptr on entry. Saves ptr on stack across GetStdHandle call.
+    // rdx = string ptr on entry. Saves ptr+len on stack across GetStdHandle.
     private void EmitWriteConsoleRdx()
     {
         int id = _labelCount++;
-        _text.AppendLine("    push rdx");                    // save string ptr
+        _text.AppendLine("    push rdx");                    // save ptr
         _text.AppendLine("    mov  rsi, rdx");
         _text.AppendLine("    xor  ecx, ecx");
         _text.AppendLine($"__strlen_loop_{id}:");
@@ -864,14 +751,14 @@ public class CodeGenerator
         _text.AppendLine("    inc  ecx");
         _text.AppendLine($"    jmp  __strlen_loop_{id}");
         _text.AppendLine($"__strlen_done_{id}:");
-        _text.AppendLine("    push rcx");                    // save length
+        _text.AppendLine("    push rcx");                    // save len
         _text.AppendLine("    sub  rsp, 40");
         _text.AppendLine("    mov  rcx, -11");
-        _text.AppendLine("    call GetStdHandle");           // volatile regs clobbered — fine
+        _text.AppendLine("    call GetStdHandle");
         _text.AppendLine("    add  rsp, 40");
-        _text.AppendLine("    pop  r8");                     // restore length → r8d
-        _text.AppendLine("    pop  rdx");                    // restore string ptr
-        _text.AppendLine("    mov  rcx, rax");               // stdout handle
+        _text.AppendLine("    pop  r8");                     // len → r8d
+        _text.AppendLine("    pop  rdx");                    // ptr restored
+        _text.AppendLine("    mov  rcx, rax");
         _text.AppendLine("    sub  rsp, 40");
         _text.AppendLine("    lea  r9,  [rel written]");
         _text.AppendLine("    mov  qword [rsp+32], 0");
@@ -885,27 +772,25 @@ public class CodeGenerator
         EmitWriteConsole(GetOrAddString("", newline: true), 1);
     }
 
-    // rax = int value on entry. Saves ptr+len on stack across GetStdHandle call.
+    // rax = int on entry. Saves ptr+len on stack across GetStdHandle.
     private void EmitWriteInt(bool addNewline)
     {
-        _text.AppendLine("    call __intToStr");             // rdx=ptr, ecx=len
+        _text.AppendLine("    call __intToStr");             // rdx=ptr ecx=len
         _text.AppendLine("    push rdx");                    // save ptr
         _text.AppendLine("    push rcx");                    // save len
         _text.AppendLine("    sub  rsp, 40");
         _text.AppendLine("    mov  rcx, -11");
         _text.AppendLine("    call GetStdHandle");
         _text.AppendLine("    add  rsp, 40");
-        _text.AppendLine("    pop  r8");                     // restore len → r8d
-        _text.AppendLine("    pop  rdx");                    // restore ptr
-        _text.AppendLine("    mov  rcx, rax");               // stdout handle
+        _text.AppendLine("    pop  r8");                     // len → r8d
+        _text.AppendLine("    pop  rdx");                    // ptr
+        _text.AppendLine("    mov  rcx, rax");
         _text.AppendLine("    sub  rsp, 40");
         _text.AppendLine("    lea  r9,  [rel written]");
         _text.AppendLine("    mov  qword [rsp+32], 0");
         _text.AppendLine("    call WriteConsoleA");
         _text.AppendLine("    add  rsp, 40");
-
-        if (addNewline)
-            EmitWriteConsole(GetOrAddString("", newline: true), 1);
+        if (addNewline) EmitWriteConsole(GetOrAddString("", newline: true), 1);
     }
 
     private void EmitIntToStrHelper()
@@ -977,7 +862,7 @@ __its_no_minus:
     private void LoadVar(string name, string reg)
     {
         var local = _scope.Lookup(name);
-        if (local.HasValue) { _text.AppendLine($"    mov  {reg}, [rbp{local.Value.offset}]"); return; }
+        if (local.HasValue)  { _text.AppendLine($"    mov  {reg}, [rbp{local.Value.offset}]"); return; }
         if (_globalVarType.ContainsKey(name)) { _text.AppendLine($"    mov  {reg}, [rel {name}]"); return; }
         throw new Exception($"Undefined variable '{name}'");
     }
@@ -985,7 +870,7 @@ __its_no_minus:
     private void StoreVar(string name, string reg)
     {
         var local = _scope.Lookup(name);
-        if (local.HasValue) { _text.AppendLine($"    mov  [rbp{local.Value.offset}], {reg}"); return; }
+        if (local.HasValue)  { _text.AppendLine($"    mov  [rbp{local.Value.offset}], {reg}"); return; }
         if (_globalVarType.ContainsKey(name)) { _text.AppendLine($"    mov  [rel {name}], {reg}"); return; }
         throw new Exception($"Undefined variable '{name}'");
     }
@@ -1006,8 +891,7 @@ __its_no_minus:
             case "-": _text.AppendLine("    sub  rax, rbx"); break;
             case "*": _text.AppendLine("    imul rax, rbx"); break;
             case "/": _text.AppendLine("    cqo"); _text.AppendLine("    idiv rbx"); break;
-            case "%": _text.AppendLine("    cqo"); _text.AppendLine("    idiv rbx");
-                      _text.AppendLine("    mov  rax, rdx"); break;
+            case "%": _text.AppendLine("    cqo"); _text.AppendLine("    idiv rbx"); _text.AppendLine("    mov  rax, rdx"); break;
         }
     }
 
@@ -1017,17 +901,9 @@ __its_no_minus:
         {
             switch (e)
             {
-                case VariableDeclaration v:
-                    _bss.AppendLine($"{v.Name}: resq 1");
-                    _globalVarType[v.Name] = v.Type;
-                    break;
-                case ArrayDeclaration a:
-                    _bss.AppendLine($"{a.Name}: resq 1");
-                    _globalVarType[a.Name] = a.ElementType + "[]";
-                    break;
-                case ClassDeclaration cls:
-                    ReserveGlobals(cls.Body);
-                    break;
+                case VariableDeclaration v: _bss.AppendLine($"{v.Name}: resq 1"); _globalVarType[v.Name] = v.Type; break;
+                case ArrayDeclaration a:    _bss.AppendLine($"{a.Name}: resq 1"); _globalVarType[a.Name] = a.ElementType + "[]"; break;
+                case ClassDeclaration cls:  ReserveGlobals(cls.Body); break;
             }
         }
     }
@@ -1042,17 +918,14 @@ __its_no_minus:
                 case VariableDeclaration: count++; break;
                 case ArrayDeclaration:    count++; break;
                 case IfStatement i:
-                    int thenC = CountLocals(i.ThenBranch);
-                    int elseC = CountLocals(i.ElseBranch);
+                    int thenC = CountLocals(i.ThenBranch), elseC = CountLocals(i.ElseBranch);
                     foreach (var ei in i.ElseIfs) elseC = Math.Max(elseC, CountLocals(ei.Body));
-                    count += Math.Max(thenC, elseC);
-                    break;
+                    count += Math.Max(thenC, elseC); break;
                 case WhileStatement w: count += CountLocals(w.Body); break;
                 case ForStatement f:   count++; count += CountLocals(f.Body); break;
                 case TryStatement t:
                     count += Math.Max(CountLocals(t.TryBody), CountLocals(t.CatchBody));
-                    count += CountLocals(t.FinallyBody);
-                    break;
+                    count += CountLocals(t.FinallyBody); break;
             }
         }
         return count;
@@ -1062,34 +935,23 @@ __its_no_minus:
     {
         string key = text + (newline ? "\n" : "");
         if (_strMap.TryGetValue(key, out string? existing)) return existing;
-
         _strCount++;
         string label = $"msg{_strCount}";
-        var    sb    = new StringBuilder();
+        var sb = new StringBuilder();
         sb.Append($"{label}: db ");
-
         bool inStr = false;
         foreach (char ch in text)
         {
             if (ch == '\n' || ch == '\t' || ch == '"')
             {
                 if (inStr) { sb.Append("\","); inStr = false; }
-                sb.Append($"{(ch == '\n' ? "0xA" : ch == '\t' ? "0x9" : "0x22")},");
+                sb.Append($"{(ch=='\n'?"0xA":ch=='\t'?"0x9":"0x22")},");
             }
-            else
-            {
-                if (!inStr) { sb.Append('"'); inStr = true; }
-                sb.Append(ch);
-            }
+            else { if (!inStr) { sb.Append('"'); inStr = true; } sb.Append(ch); }
         }
-
         if (inStr) sb.Append('"');
         else if (text.Length > 0) sb.Length--;
-
-        sb.Append(newline
-            ? (text.Length > 0 ? ",0xA,0" : "0xA,0")
-            : (text.Length > 0 ? ",0"     : "0"));
-
+        sb.Append(newline ? (text.Length>0?",0xA,0":"0xA,0") : (text.Length>0?",0":"0"));
         _data.AppendLine(sb.ToString());
         _strMap[key] = label;
         return label;
@@ -1104,17 +966,12 @@ __its_no_minus:
         sb.AppendLine("extern GetStdHandle");
         sb.AppendLine("extern ReadConsoleA");
         sb.AppendLine();
-        sb.AppendLine("section .data");
-        sb.Append(_data);
-        sb.AppendLine();
-        sb.AppendLine("section .bss");
-        sb.Append(_bss);
-        sb.AppendLine();
+        sb.AppendLine("section .data"); sb.Append(_data); sb.AppendLine();
+        sb.AppendLine("section .bss");  sb.Append(_bss);  sb.AppendLine();
         sb.AppendLine("section .text");
         sb.AppendLine("global start");
         sb.AppendLine("start:");
-        sb.Append(_main);
-        sb.AppendLine();
+        sb.Append(_main); sb.AppendLine();
         sb.Append(_helpers);
         return sb.ToString();
     }
