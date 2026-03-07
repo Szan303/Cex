@@ -16,7 +16,7 @@ public enum TokenType
     And, Or, Not,
 
     // Types
-    Type,           // int, float, string, bool
+    Type,           // int, float, string, bool, char
 
     // Literals & names
     Identifier,
@@ -24,6 +24,7 @@ public enum TokenType
     FloatNumber,
     StringLiteral,
     BoolLiteral,
+    CharLiteral,    // 'x'
 
     // Operators
     Equals,         // =

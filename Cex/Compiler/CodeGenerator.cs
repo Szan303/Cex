@@ -23,8 +23,8 @@ public class CodeGenerator
     private readonly ScopeStack  _scope      = new();
     private readonly Stack<(string breakLbl, string continueLbl)> _loopLabels = new();
 
-    private string? _currentFuncRetLabel  = null;
-    private string? _currentFuncRetType   = null;
+    private string? _currentFuncRetLabel = null;
+    private string? _currentFuncRetType  = null;
 
     public CodeGenerator(SymbolTable symbols)
     {
@@ -38,6 +38,7 @@ public class CodeGenerator
         _bss.AppendLine("written   resd 1");
         _bss.AppendLine("inputChar resb 256");
         _bss.AppendLine("convBuf   resb 32");
+        _bss.AppendLine("charBuf   resb 2");
         ArenaAllocator.EmitBss(_bss);
 
         foreach (var unit in units)
@@ -92,7 +93,6 @@ public class CodeGenerator
             case AsmBlock a:
                 foreach (var line in a.Lines)
                     _text.AppendLine($"    {line}");
-                // ASM block is implicitly a return — rax holds the result
                 if (_currentFuncRetLabel != null)
                     _text.AppendLine($"    jmp {_currentFuncRetLabel}");
                 break;
@@ -113,6 +113,9 @@ public class CodeGenerator
                 break;
             case BoolLiteral b:
                 _text.AppendLine($"    mov  rax, {(b.Value ? 1 : 0)}");
+                break;
+            case CharLiteral ch:
+                _text.AppendLine($"    mov  rax, {ch.Value}");
                 break;
             case StringLiteralExpr s:
                 string lbl = GetOrAddString(s.Value, newline: false);
@@ -143,6 +146,28 @@ public class CodeGenerator
                 break;
             default:
                 throw new Exception($"Cannot evaluate expression '{expr.GetType().Name}' at line {expr.Line}");
+        }
+    }
+
+    // ================================================================= type helpers
+    // Returns the byte size for a given type name
+    private static int SizeOf(string type) => type switch
+    {
+        "byte"  => 1,
+        "short" => 2,
+        "int"   => 4,
+        _       => 8,   // long, float, double, string, bool, char, etc.
+    };
+
+    // Truncate rax to the correct signed range for the given type
+    private void EmitTruncate(string type)
+    {
+        switch (type)
+        {
+            case "byte":  _text.AppendLine("    movsx rax, al");   break; // sign-extend 8-bit
+            case "short": _text.AppendLine("    movsx rax, ax");   break; // sign-extend 16-bit
+            case "int":   _text.AppendLine("    movsxd rax, eax"); break; // sign-extend 32-bit
+            // long and everything else — no truncation needed, already 64-bit
         }
     }
 
@@ -216,6 +241,10 @@ public class CodeGenerator
     private bool IsStringArg(Expression e) =>
         e is StringLiteralExpr ||
         (e is VariableExpr ve && GetVarType(ve.Name) == "string");
+
+    private bool IsCharExpr(Expression e) =>
+        e is CharLiteral ||
+        (e is VariableExpr ve && GetVarType(ve.Name) == "char");
 
     private void EmitStringEquals(BinaryExpr b)
     {
@@ -353,9 +382,6 @@ public class CodeGenerator
         return false;
     }
 
-    // emit float print helper — __printFloat
-    // in: xmm0 = double value
-    // prints as integer.fraction (3 decimal places)
     private void EmitFloatPrintHelper()
     {
         _helpers.AppendLine("""
@@ -386,20 +412,17 @@ __printFloat:
     xorpd xmm0, xmm1
 
 __pf_pos:
-    ; integer part = cvttsd2si
     cvttsd2si rax, xmm0
-    push rax                        ; save integer part
+    push rax
 
-    ; fraction = (value - intpart) * 1000 → int
     cvtsi2sd  xmm1, rax
-    subsd     xmm0, xmm1            ; xmm0 = fractional part
+    subsd     xmm0, xmm1
     mov       rax, 1000
     cvtsi2sd  xmm1, rax
     mulsd     xmm0, xmm1
-    cvttsd2si rax, xmm0             ; rax = fraction * 1000  (0-999)
-    push rax                        ; save fraction
+    cvttsd2si rax, xmm0
+    push rax
 
-    ; print integer part
     mov  rax, [rsp+8]
     call __intToStr
     push rdx
@@ -413,7 +436,6 @@ __pf_pos:
     mov  qword [rsp+32], 0
     call WriteConsoleA
 
-    ; print "."
     mov  rcx, -11
     call GetStdHandle
     mov  rcx, rax
@@ -423,11 +445,9 @@ __pf_pos:
     mov  qword [rsp+32], 0
     call WriteConsoleA
 
-    ; print fraction zero-padded to 3 digits
-    pop  rax                        ; fraction (0-999)
-    pop  rbx                        ; discard saved integer part
+    pop  rax
+    pop  rbx
 
-    ; zero-pad: build 3-char string in convBuf
     lea  rdi, [rel convBuf]
     mov  rbx, 100
     xor  rcx, rcx
@@ -438,14 +458,13 @@ __pf_digit:
     add  al, '0'
     mov  [rdi+rcx], al
     inc  rcx
-    mov  rax, rdx                   ; remainder
+    mov  rax, rdx
     mov  rdx, 0
     cmp  rbx, 1
     je   __pf_digit_done
     mov  rbx, 10
     cmp  rcx, 2
     jl   __pf_digit
-    ; last digit
     add  al, '0'
     mov  [rdi+rcx], al
     inc  rcx
@@ -467,24 +486,39 @@ __pf_digit_done:
     ret
 ; =================================================================
 """);
-
-        // add helper string data
         _data.AppendLine("__pf_dot:   db \".\",0");
         _data.AppendLine("__pf_minus: db \"-\",0");
     }
 
-    // load float var into xmm0
     private void EmitLoadFloat(string name)
     {
         LoadVar(name, "rax");
         _text.AppendLine("    movq xmm0, rax");
     }
 
-    // call __printFloat with xmm0 already loaded, then optionally newline
     private void EmitCallPrintFloat(bool addNewline)
     {
         _text.AppendLine("    sub  rsp, 40");
         _text.AppendLine("    call __printFloat");
+        _text.AppendLine("    add  rsp, 40");
+        if (addNewline)
+            EmitWriteConsole(GetOrAddString("", newline: true), 1);
+    }
+
+    // ================================================================= char helpers
+    // rax must hold the ASCII value before calling this
+    private void EmitWriteChar(bool addNewline)
+    {
+        _text.AppendLine("    mov  [rel charBuf], al");
+        _text.AppendLine("    sub  rsp, 40");
+        _text.AppendLine("    mov  rcx, -11");
+        _text.AppendLine("    call GetStdHandle");
+        _text.AppendLine("    mov  rcx, rax");
+        _text.AppendLine("    lea  rdx, [rel charBuf]");
+        _text.AppendLine("    mov  r8d, 1");
+        _text.AppendLine("    lea  r9,  [rel written]");
+        _text.AppendLine("    mov  qword [rsp+32], 0");
+        _text.AppendLine("    call WriteConsoleA");
         _text.AppendLine("    add  rsp, 40");
         if (addNewline)
             EmitWriteConsole(GetOrAddString("", newline: true), 1);
@@ -540,7 +574,7 @@ __pf_digit_done:
         }
 
         EmitExpr(v.Init);
-        // rax holds either int value or raw IEEE754 bits (from float func via movq rax, xmm0)
+        EmitTruncate(v.Type);
         _text.AppendLine($"    mov  qword [rbp{offset}], rax");
     }
 
@@ -586,6 +620,11 @@ __pf_digit_done:
                     {
                         EmitBoolPrint(seg.Expr, addNewline: isLast);
                     }
+                    else if (IsCharExpr(seg.Expr))
+                    {
+                        EmitExpr(seg.Expr);
+                        EmitWriteChar(addNewline: isLast);
+                    }
                     else
                     {
                         EmitExpr(seg.Expr);
@@ -625,8 +664,14 @@ __pf_digit_done:
                 LoadVar(p.VarName, "rax");
                 EmitBoolPrint(null, addNewline: true, alreadyInRax: true);
             }
+            else if (type == "char")
+            {
+                LoadVar(p.VarName, "rax");
+                EmitWriteChar(addNewline: true);
+            }
             else
             {
+                // int, long, byte, short — all print as integer
                 LoadVar(p.VarName, "rax");
                 EmitWriteInt(addNewline: true);
             }
@@ -689,9 +734,15 @@ __pf_digit_done:
         _text.AppendLine("    add  rsp, 40");
         EmitTrimInputBuffer();
         string type = GetVarType(inp.VarName);
-        if (IsFloatType(type) || type == "int")
+        if (type is "byte" or "short" or "int" or "long" || IsFloatType(type))
         {
             EmitStrToInt();
+            EmitTruncate(type);
+            StoreVar(inp.VarName, "rax");
+        }
+        else if (type == "char")
+        {
+            _text.AppendLine("    movzx rax, byte [rel inputChar]");
             StoreVar(inp.VarName, "rax");
         }
         else
@@ -910,9 +961,6 @@ __pf_digit_done:
 
         foreach (var e in fn.Body) Emit(e);
 
-        // if last statement was an ASM block and function returns float/int,
-        // rax already has the value — just fall through to ret
-        // but we still need the label for early returns
         _text.AppendLine($"{retLabel}:");
         _text.AppendLine($"    add  rsp, {frameSize}");
         _text.AppendLine("    pop  rbp");
@@ -1030,9 +1078,23 @@ __pf_digit_done:
     {
         switch (a.Operator)
         {
-            case "++": LoadVar(a.VarName, "rax"); _text.AppendLine("    inc  rax"); StoreVar(a.VarName, "rax"); break;
-            case "--": LoadVar(a.VarName, "rax"); _text.AppendLine("    dec  rax"); StoreVar(a.VarName, "rax"); break;
-            case "=":  EmitExpr(a.Value!); StoreVar(a.VarName, "rax"); break;
+            case "++":
+                LoadVar(a.VarName, "rax");
+                _text.AppendLine("    inc  rax");
+                EmitTruncate(GetVarType(a.VarName));
+                StoreVar(a.VarName, "rax");
+                break;
+            case "--":
+                LoadVar(a.VarName, "rax");
+                _text.AppendLine("    dec  rax");
+                EmitTruncate(GetVarType(a.VarName));
+                StoreVar(a.VarName, "rax");
+                break;
+            case "=":
+                EmitExpr(a.Value!);
+                EmitTruncate(GetVarType(a.VarName));
+                StoreVar(a.VarName, "rax");
+                break;
             default:
                 LoadVar(a.VarName, "rax");
                 _text.AppendLine("    push rax");
@@ -1044,6 +1106,7 @@ __pf_digit_done:
                     "+" => "+", "-" => "-", "*" => "*", "/" => "/", "%" => "%",
                     _ => throw new Exception($"Unknown operator: {a.Operator}")
                 });
+                EmitTruncate(GetVarType(a.VarName));
                 StoreVar(a.VarName, "rax");
                 break;
         }
@@ -1269,7 +1332,7 @@ __its_no_minus:
                 case VariableDeclaration: count++; break;
                 case ArrayDeclaration:    count++; break;
                 case ForStatement f:
-                    count += 2; // loop var + step var
+                    count += 2;
                     count += CountLocals(f.Body);
                     break;
                 case IfStatement i:

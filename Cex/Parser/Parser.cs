@@ -234,6 +234,12 @@ public class Parser
             return new BoolLiteral { Value = val, Line = line };
         }
 
+        if (Check(TokenType.CharLiteral))
+        {
+            int val = int.Parse(Advance().Value);
+            return new CharLiteral { Value = val, Line = line };
+        }
+
         if (Match(TokenType.Null))
             return new NumberLiteral { Value = 0, Line = line };
 
@@ -258,12 +264,12 @@ public class Parser
         int    line = Peek().Line;
         string name = Advance().Value;
 
-        // handle dot notation: Math.power(x, n)  String.upper(s)  etc.
+        // handle dot notation: Math.power(x, n)  etc.
         if (Check(TokenType.Dot))
         {
-            Advance(); // consume '.'
+            Advance();
             string method = Consume(TokenType.Identifier, "Expected method name after '.'").Value;
-            name = name + "." + method; // e.g. "Math.sqrt"
+            name = name + "." + method;
         }
 
         if (Match(TokenType.ParenthesisOpen))
@@ -342,6 +348,18 @@ public class Parser
         if (Check(TokenType.Identifier))
             return new PrintStatement { VarName = Advance().Value, Line = line };
 
+        // print 'x'  (char literal)
+        if (Check(TokenType.CharLiteral))
+        {
+            int val = int.Parse(Advance().Value);
+            var charExpr = new CharLiteral { Value = val, Line = line };
+            return new PrintStatement
+            {
+                Segments = new List<PrintSegment> { new PrintSegment { Expr = charExpr } },
+                Line     = line
+            };
+        }
+
         if (!Check(TokenType.StringLiteral))
             throw new Exception($"Expected string literal or variable after print at line {line}");
 
@@ -374,9 +392,6 @@ public class Parser
         };
     }
 
-    // Turn a raw string into an Expression.
-    // "hello ${x} world" → BinaryExpr chain
-    // "hello"            → StringLiteralExpr
     private Expression BuildStringExpr(string raw, int line)
     {
         if (!raw.Contains("${"))

@@ -289,6 +289,7 @@ public class CexCompiler
             case NumberLiteral:
             case StringLiteralExpr:
             case BoolLiteral:
+            case CharLiteral:
             case VariableExpr:
                 break;
         }

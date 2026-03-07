@@ -22,8 +22,8 @@ class Program:
         int x = 1
         int y = 2
         checkpoint a
-        if x == 100:
-            int z = Add(x)
+        if x > 100:
+            float z = Add(x)
             print "wynik=${z}"
             print "|"
             Test()
@@ -36,4 +36,6 @@ class Program:
         else:
             print "${x}. super" + x
             x++
+            x++
+            print "erouhgiw" + x
             goto a
