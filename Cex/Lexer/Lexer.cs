@@ -58,6 +58,13 @@ public class Lexer
             // whitespace
             if (c == ' ' || c == '\t') { _pos++; continue; }
 
+            // char literal  'x'
+            if (c == '\'')
+            {
+                tokens.Add(ReadChar());
+                continue;
+            }
+
             // string literal  "..."  or smart quotes
             if (c == '"' || c == '\u201C' || c == '\u201D')
             {
@@ -244,6 +251,37 @@ public class Lexer
         return new Token(TokenType.StringLiteral, sb.ToString(), _line);
     }
 
+    private Token ReadChar()
+    {
+        _pos++; // skip opening '
+        char ch = '\0';
+
+        if (_pos < _src.Length)
+        {
+            if (_src[_pos] == '\\' && _pos + 1 < _src.Length)
+            {
+                _pos++;
+                ch = _src[_pos] switch
+                {
+                    'n'  => '\n',
+                    't'  => '\t',
+                    '\\' => '\\',
+                    '\'' => '\'',
+                    '0'  => '\0',
+                    _    => _src[_pos]
+                };
+            }
+            else
+            {
+                ch = _src[_pos];
+            }
+            _pos++;
+        }
+
+        if (_pos < _src.Length && _src[_pos] == '\'') _pos++; // skip closing '
+        return new Token(TokenType.CharLiteral, ((int)ch).ToString(), _line);
+    }
+
     // ================================================================= helpers
     private char Peek(int offset = 1) =>
         _pos + offset < _src.Length ? _src[_pos + offset] : '\0';
@@ -282,6 +320,10 @@ public class Lexer
         "float"     => T(TokenType.Type,        w),
         "string"    => T(TokenType.Type,        w),
         "bool"      => T(TokenType.Type,        w),
+        "char"      => T(TokenType.Type,        w),
+        "long"      => T(TokenType.Type,        w),
+        "byte"      => T(TokenType.Type,        w),
+        "short"     => T(TokenType.Type,        w),
         "true"      => T(TokenType.BoolLiteral, w),
         "false"     => T(TokenType.BoolLiteral, w),
         "null"      => T(TokenType.Null,        w),

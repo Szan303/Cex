@@ -4,7 +4,7 @@ namespace Cex.AST;
 
 public abstract class Expression
 {
-    public int Line { get; set; } = 0;   // ← line number on every node
+    public int Line { get; set; } = 0;
 }
 
 // ------------------------------------------------------------------ literals
@@ -21,6 +21,11 @@ public class StringLiteralExpr : Expression
 public class BoolLiteral : Expression
 {
     public bool Value { get; set; }
+}
+
+public class CharLiteral : Expression
+{
+    public int Value { get; set; }  // ASCII code
 }
 
 public class VariableExpr : Expression
@@ -76,11 +81,11 @@ public class ReturnStatement : Expression
 // ------------------------------------------------------------------ condition
 public class Condition
 {
-    public Expression Left    { get; set; } = null!;
-    public string     Op      { get; set; } = "";
-    public Expression? Right  { get; set; }        // null for boolean conditions (if b:)
-    public bool       Negated { get; set; }
-    public int        Line    { get; set; }
+    public Expression  Left    { get; set; } = null!;
+    public string      Op      { get; set; } = "";
+    public Expression? Right   { get; set; }
+    public bool        Negated { get; set; }
+    public int         Line    { get; set; }
 }
 
 // ------------------------------------------------------------------ if
