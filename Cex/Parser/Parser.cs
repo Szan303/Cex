@@ -346,7 +346,19 @@ public class Parser
 
         // print varName  (bare identifier, no quotes)
         if (Check(TokenType.Identifier))
+        {
+            // if it's a function call like length(arr), parse as full expression
+            if (_cur + 1 < _tokens.Count && _tokens[_cur + 1].Type == TokenType.ParenthesisOpen)
+            {
+                var expr = ParseExpression();
+                return new PrintStatement
+                {
+                    Segments = new List<PrintSegment> { new PrintSegment { Expr = expr } },
+                    Line     = line
+                };
+            }
             return new PrintStatement { VarName = Advance().Value, Line = line };
+        }
 
         // print 'x'  (char literal)
         if (Check(TokenType.CharLiteral))

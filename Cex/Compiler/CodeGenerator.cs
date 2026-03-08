@@ -174,13 +174,13 @@ public class CodeGenerator
     // ================================================================= EmitBinary
     private void EmitBinary(BinaryExpr b)
     {
-        if (b.Op == "+" && IsStringExpr(b.Left))
+        if (b.Op == "+" && (IsStringExpr(b.Left) || IsStringExpr(b.Right)))
         {
             EmitStringConcat(b);
             return;
         }
 
-        if ((b.Op == "==" || b.Op == "!=") && IsStringExpr(b.Left))
+        if ((b.Op == "==" || b.Op == "!=") && (IsStringExpr(b.Left) || IsStringExpr(b.Right)))
         {
             EmitStringEquals(b);
             if (b.Op == "!=")
@@ -528,11 +528,15 @@ __pf_digit_done:
     private void EmitArrayDecl(ArrayDeclaration a)
     {
         EmitExpr(a.Size);
+        _text.AppendLine("    push rax");          // save count
         _text.AppendLine("    imul rax, 8");
+        _text.AppendLine("    add  rax, 8");        // +8 for size header
         _text.AppendLine("    mov  rcx, rax");
         _text.AppendLine("    sub  rsp, 40");
         _text.AppendLine("    call __heap_alloc");
         _text.AppendLine("    add  rsp, 40");
+        _text.AppendLine("    pop  rcx");           // restore count
+        _text.AppendLine("    mov  [rax], rcx");    // store size in first 8 bytes
         StoreVar(a.Name, "rax");
         _globalVarType[a.Name] = a.ElementType + "[]";
     }
@@ -543,6 +547,7 @@ __pf_digit_done:
         _text.AppendLine("    push rax");
         EmitExpr(a.Index);
         _text.AppendLine("    imul rax, 8");
+        _text.AppendLine("    add  rax, 8");        // skip size header
         _text.AppendLine("    pop  rbx");
         _text.AppendLine("    add  rbx, rax");
         _text.AppendLine("    mov  rax, [rbx]");
@@ -554,6 +559,7 @@ __pf_digit_done:
         _text.AppendLine("    push rcx");
         EmitExpr(a.Index);
         _text.AppendLine("    imul rax, 8");
+        _text.AppendLine("    add  rax, 8");        // skip size header
         _text.AppendLine("    pop  rbx");
         _text.AppendLine("    add  rbx, rax");
         _text.AppendLine("    push rbx");
@@ -851,12 +857,12 @@ __pf_digit_done:
         _text.AppendLine($"    jl   __for_neg_{id}");
 
         _text.AppendLine($"    cmp  qword [rbp{offset}], rbx");
-        _text.AppendLine($"    jge  {lblEnd}");
+        _text.AppendLine($"    jg   {lblEnd}");
         _text.AppendLine($"    jmp  __for_body_{id}");
 
         _text.AppendLine($"__for_neg_{id}:");
         _text.AppendLine($"    cmp  qword [rbp{offset}], rbx");
-        _text.AppendLine($"    jle  {lblEnd}");
+        _text.AppendLine($"    jl   {lblEnd}");
 
         _text.AppendLine($"__for_body_{id}:");
         _scope.EnterBlock();
@@ -1014,8 +1020,15 @@ __pf_digit_done:
             case "length":
             {
                 int id = _labelCount++;
-                if (fc.Args.Count > 0 && IsStringArg(fc.Args[0]))
+                if (fc.Args.Count > 0 && IsArrayArg(fc.Args[0]))
                 {
+                    // array — read size from first 8 bytes
+                    EmitExpr(fc.Args[0]);
+                    _text.AppendLine("    mov  rax, [rax]");
+                }
+                else if (fc.Args.Count > 0 && IsStringArg(fc.Args[0]))
+                {
+                    // string — strlen
                     EmitExpr(fc.Args[0]);
                     _text.AppendLine("    mov  rsi, rax");
                     _text.AppendLine("    xor  rax, rax");
@@ -1028,6 +1041,7 @@ __pf_digit_done:
                 }
                 else
                 {
+                    // int/long/byte/short — digit count
                     EmitExpr(fc.Args[0]);
                     _text.AppendLine("    test rax, rax");
                     _text.AppendLine($"    jns  __len_pos_{id}");
@@ -1052,6 +1066,8 @@ __pf_digit_done:
             default: return false;
         }
     }
+    private bool IsArrayArg(Expression e) =>
+        e is VariableExpr ve && GetVarType(ve.Name).EndsWith("[]");
 
     // ================================================================= return / break / continue
     private void EmitReturn(ReturnStatement r)
