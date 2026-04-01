@@ -64,7 +64,7 @@ class Program
             var cex   = new CexCompiler(projectRoot);
             string asm = cex.Compile();
             File.WriteAllText(asmFile, asm);
-            Ok("done");
+            Ok("^^^^^ done ^^^^^");
 
             // ---- 2. assemble .asm → .obj ----
             Console.Write("Assembling... ");
