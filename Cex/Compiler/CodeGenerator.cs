@@ -594,113 +594,112 @@ __pf_digit_done:
     }
 
     // ================================================================= arrays
+
     // private void EmitArrayAdd(ArrayAddStatement s)
     // {
     //     int id = _labelCount++;
     //
-    //     // rbx = arr ptr
+    //     // rbx = header pointer
     //     LoadVar(s.Name, "rbx");
     //     EmitNullTrapIfZero("rbx");
     //
-    //     // rdi = len, rsi = cap
-    //     _text.AppendLine("    mov  rdi, [rbx]");    // length
-    //     _text.AppendLine("    mov  rsi, [rbx+8]");  // capacity
-    //
-    //     // if len < cap, skip grow
-    //     _text.AppendLine("    cmp  rdi, rsi");
-    //     _text.AppendLine($"    jl   __add_nogrow_{id}");
-    //
-    //     // ---------- grow ----------
-    //     // newCap = (cap == 0 ? 4 : cap*2)
-    //     _text.AppendLine("    mov  rax, rsi");
-    //     _text.AppendLine("    test rax, rax");
-    //     _text.AppendLine($"    jnz  __add_cap_nonzero_{id}");
-    //     _text.AppendLine("    mov  rax, 4");
-    //     _text.AppendLine($"    jmp  __add_newcap_ready_{id}");
-    //     _text.AppendLine($"__add_cap_nonzero_{id}:");
-    //     _text.AppendLine("    shl  rax, 1");
-    //     _text.AppendLine($"__add_newcap_ready_{id}:");
-    //
-    //     // allocate bytes = 16 + newCap*8
-    //     _text.AppendLine("    push rbx");    // save old ptr
-    //     _text.AppendLine("    push rdi");    // save len
-    //     _text.AppendLine("    push rax");    // save newCap
-    //
-    //     _text.AppendLine("    imul rax, 8");
-    //     _text.AppendLine("    add  rax, 16");
-    //     _text.AppendLine("    mov  rcx, rax");
-    //     _text.AppendLine("    sub  rsp, 40");
-    //     _text.AppendLine("    call __heap_alloc");
-    //     _text.AppendLine("    add  rsp, 40");
-    //
-    //     // stack: [newCap][len][oldPtr]
-    //     _text.AppendLine("    pop  rcx");      // rcx = newCap
-    //     _text.AppendLine("    pop  rdx");      // rdx = len
-    //     _text.AppendLine("    pop  r8");       // r8  = oldPtr
-    //
-    //     // init header
-    //     _text.AppendLine("    mov  [rax], rdx");     // length stays same
-    //     _text.AppendLine("    mov  [rax+8], rcx");   // new capacity
-    //
-    //     // copy elements: for i=0..len-1: new[i] = old[i]
-    //     _text.AppendLine("    xor  r9, r9");         // i = 0
-    //     _text.AppendLine($"__add_copy_{id}:");
-    //     _text.AppendLine("    cmp  r9, rdx");
-    //     _text.AppendLine($"    jge  __add_copy_done_{id}");
-    //     _text.AppendLine("    mov  r10, [r8 + 16 + r9*8]");
-    //     _text.AppendLine("    mov  [rax + 16 + r9*8], r10");
-    //     _text.AppendLine("    inc  r9");
-    //     _text.AppendLine($"    jmp  __add_copy_{id}");
-    //     _text.AppendLine($"__add_copy_done_{id}:");
-    //
-    //     // update variable to new ptr
-    //     StoreVar(s.Name, "rax");
-    //
-    //     // reload rbx (arr ptr) and len/cap
-    //     _text.AppendLine("    mov  rbx, rax");
+    //     // rdi = len
     //     _text.AppendLine("    mov  rdi, [rbx]");
+    //
+    //     // rsi = cap
     //     _text.AppendLine("    mov  rsi, [rbx+8]");
     //
-    //     _text.AppendLine($"__add_nogrow_{id}:");
+    //     // if (len >= cap) trap for now (until grow is added)
+    //     _text.AppendLine("    cmp  rdi, rsi");
+    //     _text.AppendLine($"    jl   __add_ok_{id}");
+    //     EmitTrapExit1();
+    //     _text.AppendLine($"__add_ok_{id}:");
     //
-    //     // compute element address = rbx + 16 + len*8
-    //     _text.AppendLine("    lea  rbx, [rbx + 16 + rdi*8]");
-    //     _text.AppendLine("    push rbx");
-    //     EmitExpr(s.Value);                 // rax=value
-    //     _text.AppendLine("    pop  rbx");
-    //     _text.AppendLine("    mov  [rbx], rax");
+    //     // compute element address into r8 (KEEP rbx pointing at header)
+    //     _text.AppendLine("    lea  r8, [rbx + 16 + rdi*8]");
     //
-    //     // increment length
-    //     LoadVar(s.Name, "rbx");
+    //     // rax = value
+    //     EmitExpr(s.Value);
+    //
+    //     // store element
+    //     _text.AppendLine("    mov  [r8], rax");
+    //
+    //     // len++
     //     _text.AppendLine("    inc  qword [rbx]");
     // }
     private void EmitArrayAdd(ArrayAddStatement s)
     {
         int id = _labelCount++;
 
-        // rbx = header pointer
+        // rbx = arr header ptr
         LoadVar(s.Name, "rbx");
         EmitNullTrapIfZero("rbx");
 
-        // rdi = len
-        _text.AppendLine("    mov  rdi, [rbx]");
+        // rdi = len, rsi = cap
+        _text.AppendLine("    mov  rdi, [rbx]");    // length
+        _text.AppendLine("    mov  rsi, [rbx+8]");  // capacity
 
-        // rsi = cap
-        _text.AppendLine("    mov  rsi, [rbx+8]");
-
-        // if (len >= cap) trap for now (until grow is added)
+        // if (len < cap) -> no grow
         _text.AppendLine("    cmp  rdi, rsi");
-        _text.AppendLine($"    jl   __add_ok_{id}");
-        EmitTrapExit1();
-        _text.AppendLine($"__add_ok_{id}:");
+        _text.AppendLine($"    jl   __add_nogrow_{id}");
 
-        // compute element address into r8 (KEEP rbx pointing at header)
+        // -------------------- GROW --------------------
+        // newCap = (cap == 0 ? 4 : cap*2)
+        _text.AppendLine("    mov  rax, rsi");
+        _text.AppendLine("    test rax, rax");
+        _text.AppendLine($"    jnz  __add_cap_nonzero_{id}");
+        _text.AppendLine("    mov  rax, 4");
+        _text.AppendLine($"    jmp  __add_newcap_ready_{id}");
+        _text.AppendLine($"__add_cap_nonzero_{id}:");
+        _text.AppendLine("    shl  rax, 1");
+        _text.AppendLine($"__add_newcap_ready_{id}:");   // rax=newCap
+
+        // Allocate: bytes = 16 + newCap*8
+        _text.AppendLine("    push rbx");   // oldPtr
+        _text.AppendLine("    push rdi");   // len
+        _text.AppendLine("    push rax");   // newCap
+
+        _text.AppendLine("    imul rax, 8");
+        _text.AppendLine("    add  rax, 16");
+        _text.AppendLine("    mov  rcx, rax");
+        _text.AppendLine("    sub  rsp, 40");
+        _text.AppendLine("    call __heap_alloc");
+        _text.AppendLine("    add  rsp, 40");
+        // rax = newPtr
+
+        // restore saved values
+        _text.AppendLine("    pop  rsi");   // rsi = newCap
+        _text.AppendLine("    pop  rdi");   // rdi = len
+        _text.AppendLine("    pop  rbx");   // rbx = oldPtr
+
+        // write new header: [newPtr]=len, [newPtr+8]=newCap
+        _text.AppendLine("    mov  [rax], rdi");
+        _text.AppendLine("    mov  [rax+8], rsi");
+
+        // copy elements i=0..len-1
+        _text.AppendLine("    xor  r8, r8");              // i=0
+        _text.AppendLine($"__add_copy_{id}:");
+        _text.AppendLine("    cmp  r8, rdi");
+        _text.AppendLine($"    jge  __add_copy_done_{id}");
+        _text.AppendLine("    mov  r9, [rbx + 16 + r8*8]");
+        _text.AppendLine("    mov  [rax + 16 + r8*8], r9");
+        _text.AppendLine("    inc  r8");
+        _text.AppendLine($"    jmp  __add_copy_{id}");
+        _text.AppendLine($"__add_copy_done_{id}:");
+
+        // update variable to newPtr
+        StoreVar(s.Name, "rax");
+
+        // reload arr pointer/counters after grow:
+        _text.AppendLine("    mov  rbx, rax");      // rbx = newPtr
+        _text.AppendLine("    mov  rdi, [rbx]");    // len
+        _text.AppendLine("    mov  rsi, [rbx+8]");  // cap
+
+        _text.AppendLine($"__add_nogrow_{id}:");
+
+        // store value at elements[len]
         _text.AppendLine("    lea  r8, [rbx + 16 + rdi*8]");
-
-        // rax = value
         EmitExpr(s.Value);
-
-        // store element
         _text.AppendLine("    mov  [r8], rax");
 
         // len++
