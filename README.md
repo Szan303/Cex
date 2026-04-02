@@ -1,6 +1,6 @@
-# C! Compiler — Documentation (version 0.6.9)
+# C! Compiler — Documentation (version 0.6.10)
 
-This document describes the C! compiler v0.6.9: how to use it, language features supported, how to write libraries in C!, and implementation/interop notes relevant to this release.
+This document describes the C! compiler v0.6.10: how to use it, language features supported, how to write libraries in C!, and implementation/interop notes relevant to this release.
 
 Contents
 - Overview
