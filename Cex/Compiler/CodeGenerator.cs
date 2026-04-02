@@ -86,7 +86,6 @@ public class CodeGenerator
         _text.AppendLine("    test rbx, rbx");
         _text.AppendLine($"    jnz  __arr_notnull_{id}");
         EmitWriteConsole(GetOrAddString("null", newline: addNewline), addNewline ? 5 : 4);
-        return;
 
         _text.AppendLine($"__arr_notnull_{id}:");
 
@@ -94,7 +93,7 @@ public class CodeGenerator
         EmitWriteConsole(GetOrAddString("[", newline: false), 1);
 
         // rcx = len
-        _text.AppendLine("    mov  rcx, [rbx]");
+        _text.AppendLine("    mov  r12, [rbx]");
         _text.AppendLine("    xor  rdi, rdi"); // i=0
 
         string arrType  = GetVarType(varName);
@@ -102,7 +101,7 @@ public class CodeGenerator
         bool elemIsString = (elemType == "string");
 
         _text.AppendLine($"__arr_loop_{id}:");
-        _text.AppendLine("    cmp  rdi, rcx");
+        _text.AppendLine("    cmp  rdi, r12");
         _text.AppendLine($"    jge  __arr_end_{id}");
 
         // if i>0 print comma
@@ -112,7 +111,7 @@ public class CodeGenerator
         _text.AppendLine($"__arr_nocomma_{id}:");
 
         // load element into rax: [rbx + 8 + i*8]
-        _text.AppendLine("    mov  rax, [rbx + 8 + rdi*8]");
+        _text.AppendLine("    mov  rax, [rbx + 16 + rdi*8]");
 
         if (elemIsString)
         {
@@ -140,6 +139,8 @@ public class CodeGenerator
         {
             case FunctionDeclaration:   break;
             case ImportStatement:       break;
+            case ArrayAddStatement a:    EmitArrayAdd(a);    break;
+            case ArrayDeleteStatement d: EmitArrayDelete(d); break;
             case VariableDeclaration v: EmitVarDecl(v);     break;
             case ArrayDeclaration a:    EmitArrayDecl(a);   break;
             case ArrayAssignment a:     EmitArrayAssign(a); break;
@@ -593,20 +594,188 @@ __pf_digit_done:
     }
 
     // ================================================================= arrays
+    // private void EmitArrayAdd(ArrayAddStatement s)
+    // {
+    //     int id = _labelCount++;
+    //
+    //     // rbx = arr ptr
+    //     LoadVar(s.Name, "rbx");
+    //     EmitNullTrapIfZero("rbx");
+    //
+    //     // rdi = len, rsi = cap
+    //     _text.AppendLine("    mov  rdi, [rbx]");    // length
+    //     _text.AppendLine("    mov  rsi, [rbx+8]");  // capacity
+    //
+    //     // if len < cap, skip grow
+    //     _text.AppendLine("    cmp  rdi, rsi");
+    //     _text.AppendLine($"    jl   __add_nogrow_{id}");
+    //
+    //     // ---------- grow ----------
+    //     // newCap = (cap == 0 ? 4 : cap*2)
+    //     _text.AppendLine("    mov  rax, rsi");
+    //     _text.AppendLine("    test rax, rax");
+    //     _text.AppendLine($"    jnz  __add_cap_nonzero_{id}");
+    //     _text.AppendLine("    mov  rax, 4");
+    //     _text.AppendLine($"    jmp  __add_newcap_ready_{id}");
+    //     _text.AppendLine($"__add_cap_nonzero_{id}:");
+    //     _text.AppendLine("    shl  rax, 1");
+    //     _text.AppendLine($"__add_newcap_ready_{id}:");
+    //
+    //     // allocate bytes = 16 + newCap*8
+    //     _text.AppendLine("    push rbx");    // save old ptr
+    //     _text.AppendLine("    push rdi");    // save len
+    //     _text.AppendLine("    push rax");    // save newCap
+    //
+    //     _text.AppendLine("    imul rax, 8");
+    //     _text.AppendLine("    add  rax, 16");
+    //     _text.AppendLine("    mov  rcx, rax");
+    //     _text.AppendLine("    sub  rsp, 40");
+    //     _text.AppendLine("    call __heap_alloc");
+    //     _text.AppendLine("    add  rsp, 40");
+    //
+    //     // stack: [newCap][len][oldPtr]
+    //     _text.AppendLine("    pop  rcx");      // rcx = newCap
+    //     _text.AppendLine("    pop  rdx");      // rdx = len
+    //     _text.AppendLine("    pop  r8");       // r8  = oldPtr
+    //
+    //     // init header
+    //     _text.AppendLine("    mov  [rax], rdx");     // length stays same
+    //     _text.AppendLine("    mov  [rax+8], rcx");   // new capacity
+    //
+    //     // copy elements: for i=0..len-1: new[i] = old[i]
+    //     _text.AppendLine("    xor  r9, r9");         // i = 0
+    //     _text.AppendLine($"__add_copy_{id}:");
+    //     _text.AppendLine("    cmp  r9, rdx");
+    //     _text.AppendLine($"    jge  __add_copy_done_{id}");
+    //     _text.AppendLine("    mov  r10, [r8 + 16 + r9*8]");
+    //     _text.AppendLine("    mov  [rax + 16 + r9*8], r10");
+    //     _text.AppendLine("    inc  r9");
+    //     _text.AppendLine($"    jmp  __add_copy_{id}");
+    //     _text.AppendLine($"__add_copy_done_{id}:");
+    //
+    //     // update variable to new ptr
+    //     StoreVar(s.Name, "rax");
+    //
+    //     // reload rbx (arr ptr) and len/cap
+    //     _text.AppendLine("    mov  rbx, rax");
+    //     _text.AppendLine("    mov  rdi, [rbx]");
+    //     _text.AppendLine("    mov  rsi, [rbx+8]");
+    //
+    //     _text.AppendLine($"__add_nogrow_{id}:");
+    //
+    //     // compute element address = rbx + 16 + len*8
+    //     _text.AppendLine("    lea  rbx, [rbx + 16 + rdi*8]");
+    //     _text.AppendLine("    push rbx");
+    //     EmitExpr(s.Value);                 // rax=value
+    //     _text.AppendLine("    pop  rbx");
+    //     _text.AppendLine("    mov  [rbx], rax");
+    //
+    //     // increment length
+    //     LoadVar(s.Name, "rbx");
+    //     _text.AppendLine("    inc  qword [rbx]");
+    // }
+    private void EmitArrayAdd(ArrayAddStatement s)
+    {
+        int id = _labelCount++;
+
+        // rbx = header pointer
+        LoadVar(s.Name, "rbx");
+        EmitNullTrapIfZero("rbx");
+
+        // rdi = len
+        _text.AppendLine("    mov  rdi, [rbx]");
+
+        // rsi = cap
+        _text.AppendLine("    mov  rsi, [rbx+8]");
+
+        // if (len >= cap) trap for now (until grow is added)
+        _text.AppendLine("    cmp  rdi, rsi");
+        _text.AppendLine($"    jl   __add_ok_{id}");
+        EmitTrapExit1();
+        _text.AppendLine($"__add_ok_{id}:");
+
+        // compute element address into r8 (KEEP rbx pointing at header)
+        _text.AppendLine("    lea  r8, [rbx + 16 + rdi*8]");
+
+        // rax = value
+        EmitExpr(s.Value);
+
+        // store element
+        _text.AppendLine("    mov  [r8], rax");
+
+        // len++
+        _text.AppendLine("    inc  qword [rbx]");
+    }
+    private void EmitArrayDelete(ArrayDeleteStatement s)
+    {
+        int id = _labelCount++;
+
+        LoadVar(s.Name, "rbx");
+        EmitNullTrapIfZero("rbx");
+
+        // rax = index
+        EmitExpr(s.Index);
+
+        _text.AppendLine("    test rax, rax");
+        _text.AppendLine($"    js   __del_oob_{id}");
+
+        // rcx = len
+        _text.AppendLine("    mov  rcx, [rbx]");
+        _text.AppendLine("    cmp  rax, rcx");
+        _text.AppendLine($"    jge  __del_oob_{id}");
+
+        // if len == 0 -> oob (should already be impossible due to check)
+        // shift: for i=index .. len-2: a[i] = a[i+1]
+        _text.AppendLine("    mov  rdi, rax");   // i = index
+        _text.AppendLine("    dec  rcx");        // lastValidIndex = len-1
+        _text.AppendLine($"__del_shift_{id}:");
+        _text.AppendLine("    cmp  rdi, rcx");
+        _text.AppendLine($"    jge  __del_shift_done_{id}");
+
+        _text.AppendLine("    mov  r8,  [rbx + 16 + (rdi+1)*8]");
+        _text.AppendLine("    mov  [rbx + 16 + rdi*8], r8");
+        _text.AppendLine("    inc  rdi");
+        _text.AppendLine($"    jmp  __del_shift_{id}");
+
+        _text.AppendLine($"__del_shift_done_{id}:");
+
+        // length--
+        _text.AppendLine("    dec  qword [rbx]");
+        _text.AppendLine($"    jmp  __del_ok_{id}");
+
+        _text.AppendLine($"__del_oob_{id}:");
+        EmitTrapExit1();
+        _text.AppendLine($"__del_ok_{id}:");
+    }
     private void EmitArrayDecl(ArrayDeclaration a)
     {
+        // capacity in rax
         EmitExpr(a.Size);
-        _text.AppendLine("    push rax");          // save count
+
+        int id = _labelCount++;
+        _text.AppendLine("    test rax, rax");
+        _text.AppendLine($"    jns  __cap_ok_{id}");
+        EmitTrapExit1();
+        _text.AppendLine($"__cap_ok_{id}:");
+
+        _text.AppendLine("    push rax");          // save capacity
         _text.AppendLine("    imul rax, 8");
-        _text.AppendLine("    add  rax, 8");        // +8 for size header
+        _text.AppendLine("    add  rax, 16");      // header: length+capacity
         _text.AppendLine("    mov  rcx, rax");
         _text.AppendLine("    sub  rsp, 40");
         _text.AppendLine("    call __heap_alloc");
         _text.AppendLine("    add  rsp, 40");
-        _text.AppendLine("    pop  rcx");           // restore count
-        _text.AppendLine("    mov  [rax], rcx");    // store size in first 8 bytes
+        _text.AppendLine("    pop  rcx");          // rcx = capacity
+
+        _text.AppendLine("    mov  qword [rax], 0");   // length = 0
+        _text.AppendLine("    mov  [rax+8], rcx");     // capacity
+
+        if (!_globalVarType.ContainsKey(a.Name) && !_scope.Lookup(a.Name).HasValue)
+            _scope.Declare(a.Name, a.ElementType + "[]");
+
         StoreVar(a.Name, "rax");
-        _globalVarType[a.Name] = a.ElementType + "[]";
+        if (_globalVarType.ContainsKey(a.Name))
+            _globalVarType[a.Name] = a.ElementType + "[]";
     }
 
     private void EmitArrayLoad(ArrayAccess a)
@@ -625,7 +794,7 @@ __pf_digit_done:
         _text.AppendLine("    cmp  rax, rcx");
         _text.AppendLine($"    jge  __oob_{id}");
 
-        _text.AppendLine("    mov  rax, [rbx + 8 + rax*8]");
+        _text.AppendLine("    mov  rax, [rbx + 16 + rax*8]");
         _text.AppendLine($"    jmp  __arr_ok_{id}");
 
         _text.AppendLine($"__oob_{id}:");
@@ -649,7 +818,7 @@ __pf_digit_done:
         _text.AppendLine("    cmp  rax, rcx");
         _text.AppendLine($"    jge  __oob_set_{id}");
 
-        _text.AppendLine("    lea  rbx, [rbx + 8 + rax*8]"); // element address
+        _text.AppendLine("    lea  rbx, [rbx + 16 + rax*8]"); // element address
 
         _text.AppendLine("    push rbx");
         EmitExpr(a.Value);
@@ -697,7 +866,18 @@ __pf_digit_done:
     // ================================================================= print
     private void EmitPrint(PrintStatement p)
     {
-        if (p.Segments != null)
+        // ------------------------------------------------------------ 1) print "literal"
+        if (p.Literal != null)
+        {
+            string text = p.Literal.Replace("\\n", "\n").Replace("\\t", "\t");
+            string lbl  = GetOrAddString(text, newline: true);
+            EmitWriteConsole(lbl, Encoding.ASCII.GetByteCount(text) + 1);
+            return;
+        }
+
+        // ------------------------------------------------------------ 2) print varName
+        // This is the path for: print table
+        if (p.VarName != null)
         {
             string type = GetVarType(p.VarName);
 
@@ -707,6 +887,43 @@ __pf_digit_done:
                 return;
             }
 
+            if (IsFloatType(type))
+            {
+                EmitLoadFloat(p.VarName);
+                EmitCallPrintFloat(addNewline: true);
+                return;
+            }
+
+            if (type == "string")
+            {
+                LoadVar(p.VarName, "rdx");
+                EmitWriteStringRdxNewline();
+                return;
+            }
+
+            if (type == "bool")
+            {
+                LoadVar(p.VarName, "rax");
+                EmitBoolPrint(null, addNewline: true, alreadyInRax: true);
+                return;
+            }
+
+            if (type == "char")
+            {
+                LoadVar(p.VarName, "rax");
+                EmitWriteChar(addNewline: true);
+                return;
+            }
+
+            // int, long, byte, short — all print as integer
+            LoadVar(p.VarName, "rax");
+            EmitWriteInt(addNewline: true);
+            return;
+        }
+
+        // ------------------------------------------------------------ 3) print expression segments (interpolation/concat)
+        if (p.Segments != null)
+        {
             var flat = new List<PrintSegment>();
             foreach (var seg in p.Segments)
             {
@@ -717,89 +934,63 @@ __pf_digit_done:
             for (int i = 0; i < flat.Count; i++)
             {
                 var  seg    = flat[i];
-                bool isLast = i == flat.Count - 1;
+                bool isLast = (i == flat.Count - 1);
 
                 if (seg.Text != null)
                 {
                     string lbl = GetOrAddString(seg.Text, newline: isLast);
-                    int    len = Encoding.ASCII.GetByteCount(seg.Text) + (isLast ? 1 : 0);
+                    int len = Encoding.ASCII.GetByteCount(seg.Text) + (isLast ? 1 : 0);
                     if (len > 0) EmitWriteConsole(lbl, len);
+                    continue;
                 }
-                else if (seg.Expr != null)
+
+                if (seg.Expr == null) continue;
+
+                // Optional: allow array vars inside expressions (print ${arr})
+                // Only handles the case where the segment is a VariableExpr that is an array.
+                if (seg.Expr is VariableExpr ve && IsArrayType(GetVarType(ve.Name)))
                 {
-                    if (IsFloatExpr(seg.Expr))
-                    {
-                        EmitExpr(seg.Expr);
-                        _text.AppendLine("    movq xmm0, rax");
-                        EmitCallPrintFloat(addNewline: isLast);
-                    }
-                    else if (IsStringExpr(seg.Expr))
-                    {
-                        EmitExpr(seg.Expr);
-                        _text.AppendLine("    mov  rdx, rax");
-                        if (isLast) EmitWriteStringRdxNewline();
-                        else        EmitWriteConsoleRdx();
-                    }
-                    else if (IsBoolExpr(seg.Expr))
-                    {
-                        EmitBoolPrint(seg.Expr, addNewline: isLast);
-                    }
-                    else if (IsCharExpr(seg.Expr))
-                    {
-                        EmitExpr(seg.Expr);
-                        EmitWriteChar(addNewline: isLast);
-                    }
-                    else
-                    {
-                        EmitExpr(seg.Expr);
-                        EmitWriteInt(addNewline: isLast);
-                    }
+                    EmitPrintArrayVar(ve.Name, addNewline: isLast);
+                    continue;
+                }
+
+                if (IsFloatExpr(seg.Expr))
+                {
+                    EmitExpr(seg.Expr);
+                    _text.AppendLine("    movq xmm0, rax");
+                    EmitCallPrintFloat(addNewline: isLast);
+                }
+                else if (IsStringExpr(seg.Expr))
+                {
+                    EmitExpr(seg.Expr);
+                    _text.AppendLine("    mov  rdx, rax");
+                    if (isLast) EmitWriteStringRdxNewline();
+                    else        EmitWriteConsoleRdx();
+                }
+                else if (IsBoolExpr(seg.Expr))
+                {
+                    EmitBoolPrint(seg.Expr, addNewline: isLast);
+                }
+                else if (IsCharExpr(seg.Expr))
+                {
+                    EmitExpr(seg.Expr);
+                    EmitWriteChar(addNewline: isLast);
+                }
+                else
+                {
+                    EmitExpr(seg.Expr);
+                    EmitWriteInt(addNewline: isLast);
                 }
             }
 
             if (flat.Count == 0)
                 EmitWriteConsole(GetOrAddString("", newline: true), 1);
+
             return;
         }
 
-        if (p.Literal != null)
-        {
-            string text = p.Literal.Replace("\\n", "\n").Replace("\\t", "\t");
-            string lbl  = GetOrAddString(text, newline: true);
-            EmitWriteConsole(lbl, Encoding.ASCII.GetByteCount(text) + 1);
-            return;
-        }
-
-        if (p.VarName != null)
-        {
-            string type = GetVarType(p.VarName);
-            if (IsFloatType(type))
-            {
-                EmitLoadFloat(p.VarName);
-                EmitCallPrintFloat(addNewline: true);
-            }
-            else if (type == "string")
-            {
-                LoadVar(p.VarName, "rdx");
-                EmitWriteStringRdxNewline();
-            }
-            else if (type == "bool")
-            {
-                LoadVar(p.VarName, "rax");
-                EmitBoolPrint(null, addNewline: true, alreadyInRax: true);
-            }
-            else if (type == "char")
-            {
-                LoadVar(p.VarName, "rax");
-                EmitWriteChar(addNewline: true);
-            }
-            else
-            {
-                // int, long, byte, short — all print as integer
-                LoadVar(p.VarName, "rax");
-                EmitWriteInt(addNewline: true);
-            }
-        }
+        // ------------------------------------------------------------ 4) fallback (shouldn't happen)
+        EmitWriteConsole(GetOrAddString("", newline: true), 1);
     }
 
     private bool IsBoolExpr(Expression e) =>
