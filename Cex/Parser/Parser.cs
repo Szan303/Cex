@@ -77,6 +77,23 @@ public class Parser
             int    saved = _cur;
             Advance();
 
+            if (Match(TokenType.Dot))
+            {
+                string method = Consume(TokenType.Identifier, "Expected method name after '.'").Value;
+
+                Consume(TokenType.ParenthesisOpen, "Expected '(' after method name");
+                var arg = ParseExpression();
+                Consume(TokenType.ParenthesisClose, "Expected ')'");
+
+                if (method == "add")
+                    return new ArrayAddStatement { Name = name, Value = arg, Line = line };
+
+                if (method == "delete")
+                    return new ArrayDeleteStatement { Name = name, Index = arg, Line = line };
+
+                throw new Exception($"Unknown method '{method}' at line {line}");
+            }
+
             // array element assignment
             if (Check(TokenType.BracketOpen))
             {
@@ -512,18 +529,34 @@ public class Parser
 
     private bool IsArrayDeclaration()
     {
-        int  saved  = _cur;
+        int saved = _cur;
         bool result = false;
+
+        // TYPE '[' <expr> ']' IDENT
         if (_cur < _tokens.Count && _tokens[_cur].Type == TokenType.Type)
         {
             _cur++;
             if (_cur < _tokens.Count && _tokens[_cur].Type == TokenType.BracketOpen)
             {
-                _cur++;
-                if (_cur < _tokens.Count && _tokens[_cur].Type == TokenType.BracketClose)
-                    result = true;
+                _cur++; // after '['
+
+                // must NOT be ']' immediately (we require initSize for now)
+                if (_cur < _tokens.Count && _tokens[_cur].Type != TokenType.BracketClose)
+                {
+                    // skip tokens until matching ']' (simple scan is ok here)
+                    while (_cur < _tokens.Count && _tokens[_cur].Type != TokenType.BracketClose)
+                        _cur++;
+
+                    if (_cur < _tokens.Count && _tokens[_cur].Type == TokenType.BracketClose)
+                    {
+                        _cur++; // after ']'
+                        if (_cur < _tokens.Count && _tokens[_cur].Type == TokenType.Identifier)
+                            result = true;
+                    }
+                }
             }
         }
+
         _cur = saved;
         return result;
     }
@@ -583,17 +616,22 @@ public class Parser
     private ArrayDeclaration ParseArrayDeclaration()
     {
         int    line     = Peek().Line;
-        string elemType = Advance().Value;
-        Consume(TokenType.BracketOpen,  "Expected '['");
-        Consume(TokenType.BracketClose, "Expected ']'");
-        string name = Consume(TokenType.Identifier, "Expected array name").Value;
-        Consume(TokenType.Equals, "Expected '='");
-        Consume(TokenType.New,    "Expected 'new'");
-        Consume(TokenType.Type,   "Expected element type after new");
-        Consume(TokenType.BracketOpen,  "Expected '['");
+        string elemType = Advance().Value; // TokenType.Type already confirmed by IsArrayDeclaration()
+
+        Consume(TokenType.BracketOpen, "Expected '[' after type");
         var size = ParseExpression();
-        Consume(TokenType.BracketClose, "Expected ']'");
-        return new ArrayDeclaration { ElementType = elemType, Name = name, Size = size, Line = line };
+        Consume(TokenType.BracketClose, "Expected ']' after init size");
+
+        string name = Consume(TokenType.Identifier, "Expected array name").Value;
+
+        // No "= new ..." anymore
+        return new ArrayDeclaration
+        {
+            ElementType = elemType,
+            Name        = name,
+            Size        = size,
+            Line        = line
+        };
     }
 
     private VariableDeclaration ParseVarDecl()
