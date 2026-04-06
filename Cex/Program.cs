@@ -95,10 +95,17 @@ class Program
             Console.WriteLine($"Build succeeded → {exeFile}");
             Console.ResetColor();
         }
-        catch (Exception ex)
+        catch (Cex.CompilerError e)
         {
-            Console.WriteLine();
-            Error($"Compile error: {ex.Message}");
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine(e.ToString());
+            Console.ResetColor();
+        }
+        catch (Exception e)
+        {
+            Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine("[Internal error] " + e.Message);
+            Console.ResetColor();
         }
     }
 

@@ -247,7 +247,10 @@ public class Lexer
             _pos++;
         }
 
-        if (_pos < _src.Length) _pos++; // skip closing quote
+        if (_pos >= _src.Length || _src[_pos] == '\n')
+            throw new Cex.CompilerError(Cex.ErrorKind.Lexer, _line, "Unterminated string literal (missing closing quote)");
+
+        _pos++; // skip closing quote
         return new Token(TokenType.StringLiteral, sb.ToString(), _line);
     }
 
