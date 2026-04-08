@@ -8,6 +8,23 @@ public partial class CodeGenerator
 {
     private void LoadVar(string name, string reg, int line = 0)
     {
+        if (_currentClassName != null && _symbols.ClassInfoByName.TryGetValue(_currentClassName, out var cls))
+        {
+            // instance field?
+            if (_currentThisReg != null && cls.InstanceFields.TryGetValue(name, out var inst))
+            {
+                _text.AppendLine($"    mov  {reg}, [{_currentThisReg}+{inst.offset}]");
+                return;
+            }
+
+            // static field?
+            if (cls.StaticFields.ContainsKey(name))
+            {
+                string label = $"{_currentClassName}_{name}";
+                _text.AppendLine($"    mov  {reg}, [rel {label}]");
+                return;
+            }
+        }
         var local = _scope.Lookup(name);
         if (local.HasValue)
         {
@@ -26,6 +43,21 @@ public partial class CodeGenerator
 
     private void StoreVar(string name, string reg, int line = 0)
     {
+        if (_currentClassName != null && _symbols.ClassInfoByName.TryGetValue(_currentClassName, out var cls))
+        {
+            if (_currentThisReg != null && cls.InstanceFields.TryGetValue(name, out var inst))
+            {
+                _text.AppendLine($"    mov  [{_currentThisReg}+{inst.offset}], {reg}");
+                return;
+            }
+
+            if (cls.StaticFields.ContainsKey(name))
+            {
+                string label = $"{_currentClassName}_{name}";
+                _text.AppendLine($"    mov  [rel {label}], {reg}");
+                return;
+            }
+        }
         var local = _scope.Lookup(name);
         if (local.HasValue)
         {
@@ -44,6 +76,14 @@ public partial class CodeGenerator
 
     private string GetVarType(string name, int line = 0)
     {
+        if (_currentClassName != null && _symbols.ClassInfoByName.TryGetValue(_currentClassName, out var cls))
+        {
+            if (cls.InstanceFields.TryGetValue(name, out var inst))
+                return inst.type;
+
+            if (cls.StaticFields.TryGetValue(name, out var stType))
+                return stType;
+        }
         var local = _scope.Lookup(name);
         if (local.HasValue) return local.Value.type;
 
@@ -67,7 +107,15 @@ public partial class CodeGenerator
                     _globalVarType[a.Name] = a.ElementType + "[]";
                     break;
                 case ClassDeclaration cls:
-                    ReserveGlobals(cls.Body);
+                    foreach (var member in cls.Body)
+                    {
+                        if (member is FieldDeclaration fd && fd.IsStatic)
+                        {
+                            string label = $"{cls.Name}_{fd.Name}";   // Foo_nextId
+                            _bss.AppendLine($"{label}: resq 1");
+                            _globalVarType[label] = fd.Type;
+                        }
+                    }
                     break;
             }
         }

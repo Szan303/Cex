@@ -47,7 +47,24 @@ public class Parser
 
         if (IsFunctionDeclaration()) return ParseFunctionDeclaration();
         if (IsArrayDeclaration()) return ParseArrayDeclaration();
-        if (Match(TokenType.Type)) return ParseVarDecl();
+        if (Check(TokenType.Type) || Check(TokenType.Identifier))
+        {
+            // lookahead: <TypeName> <Identifier> ...
+            // We must NOT steal normal identifier statements like: foo = 3
+            // So only treat Identifier as a type if next token is Identifier too.
+            if (Check(TokenType.Type))
+            {
+                Advance();
+                return ParseVarDeclFromConsumedType();
+            }
+
+            // Identifier-as-type: Foo p = ...
+            if (_cur + 1 < _tokens.Count && _tokens[_cur + 1].Type == TokenType.Identifier)
+            {
+                Advance(); // consume class-name type token as if it was TokenType.Type
+                return ParseVarDeclFromConsumedType();
+            }
+        }
 
         if (Match(TokenType.Checkpoint)) return ParseCheckpoint();
         if (Match(TokenType.Goto)) return ParseGoto();
@@ -77,33 +94,43 @@ public class Parser
         // identifier-leading statements
         if (Check(TokenType.Identifier))
         {
-            string name = Peek().Value;
-            int line = Peek().Line;
-            int saved = _cur;
+            string name  = Peek().Value;
+            int    line  = Peek().Line;
+            int    saved = _cur;
             Advance(); // consume identifier
 
-            // name.add(x) / name.delete(i)
+            // ------------------------------------------------------------
+            // name.add(x) / name.delete(i)  (array helper special-cases)
+            // IMPORTANT: if it's not add/delete, we must rewind and let the
+            // normal expression parser handle it (e.g. create.Foo(...), Math.sqrt(...))
+            // ------------------------------------------------------------
             if (Match(TokenType.Dot))
             {
                 string method = Consume(TokenType.Identifier, "Expected method name after '.'").Value;
 
-                Consume(TokenType.ParenthesisOpen, "Expected '(' after method name");
-                var arg = ParseExpression();
-                Consume(TokenType.ParenthesisClose, "Expected ')'");
+                if (method == "add" || method == "delete")
+                {
+                    Consume(TokenType.ParenthesisOpen, "Expected '(' after method name");
+                    var arg = ParseExpression();
+                    Consume(TokenType.ParenthesisClose, "Expected ')'");
 
-                if (method == "add")
-                    return new ArrayAddStatement { Name = name, Value = arg, Line = line };
+                    if (method == "add")
+                        return new ArrayAddStatement { Name = name, Value = arg, Line = line };
 
-                if (method == "delete")
+                    // method == "delete"
                     return new ArrayDeleteStatement { Name = name, Index = arg, Line = line };
+                }
 
-                throw new CompilerError(ErrorKind.Parser, line, $"Unknown method '{method}'");
+                // Not an array helper => treat as normal expression statement
+                _cur = saved;
             }
 
+            // ------------------------------------------------------------
             // array element assignment: name[index] = value
+            // ------------------------------------------------------------
             if (Check(TokenType.BracketOpen))
             {
-                Advance();
+                Advance(); // '['
                 var index = ParseExpression();
                 Consume(TokenType.BracketClose, "Expected ']'");
                 Consume(TokenType.Equals, "Expected '='");
@@ -111,21 +138,17 @@ public class Parser
                 return new ArrayAssignment { Name = name, Index = index, Value = val, Line = line };
             }
 
-            // function call statement: foo(...)
-            if (Check(TokenType.ParenthesisOpen))
-            {
-                _cur = saved;
-                var callExpr = (CallExpr)ParsePrimaryCall();
-                return new FunctionCall { Name = callExpr.Name, Arguments = callExpr.Args, Line = line };
-            }
-
+            // ------------------------------------------------------------
             // postfix ++ / --
+            // ------------------------------------------------------------
             if (Match(TokenType.PlusPlus))
                 return new AssignmentStatement { VarName = name, Operator = "++", Line = line };
             if (Match(TokenType.MinusMinus))
                 return new AssignmentStatement { VarName = name, Operator = "--", Line = line };
 
-            // compound assignment
+            // ------------------------------------------------------------
+            // compound assignment (must happen before expression fallback)
+            // ------------------------------------------------------------
             if (Check(TokenType.PlusEquals) || Check(TokenType.MinusEquals) ||
                 Check(TokenType.StarEquals) || Check(TokenType.SlashEquals) ||
                 Check(TokenType.PercentEquals))
@@ -135,14 +158,25 @@ public class Parser
                 return new AssignmentStatement { VarName = name, Operator = op, Value = rhs, Line = line };
             }
 
+            // ------------------------------------------------------------
             // normal assignment
+            // ------------------------------------------------------------
             if (Match(TokenType.Equals))
             {
                 var rhs = ParseExpression();
                 return new AssignmentStatement { VarName = name, Operator = "=", Value = rhs, Line = line };
             }
 
+            // ------------------------------------------------------------
+            // expression statement fallback:
+            //   - create.Foo(...)
+            //   - Math.sqrt(...)
+            //   - foo(...)  (also works here)
+            //   - anything else expression-y
+            // ------------------------------------------------------------
             _cur = saved;
+            var exprStmt = ParseExpression();
+            return new ExpressionStatement { Expr = exprStmt, Line = line };
         }
 
         // unknown token -> skip it (tolerant mode)
@@ -299,12 +333,45 @@ public class Parser
         int line = Peek().Line;
         string name = Advance().Value;
 
+        if (name == "create" && Check(TokenType.Dot))
+        {
+            Advance(); // '.'
+            string clsName = Consume(TokenType.Identifier, "Expected class name after create.").Value;
+
+            Consume(TokenType.ParenthesisOpen, "Expected '(' after class name");
+            var args = new List<Expression>();
+            while (!Check(TokenType.ParenthesisClose) && !IsAtEnd())
+            {
+                args.Add(ParseExpression());
+                Match(TokenType.Comma);
+            }
+            Consume(TokenType.ParenthesisClose, "Expected ')'");
+
+            return new CreateExpr { ClassName = clsName, Args = args, Line = line };
+        }
+
         // dot notation for calls: Math.power(x, n)
+        // dot notation: could be "Math.power(...)" OR "p.id"
         if (Check(TokenType.Dot))
         {
             Advance();
-            string method = Consume(TokenType.Identifier, "Expected method name after '.'").Value;
-            name = name + "." + method;
+            string member = Consume(TokenType.Identifier, "Expected member name after '.'").Value;
+
+            // If next is '(' => it's a normal dotted call: Math.power(...)
+            if (Check(TokenType.ParenthesisOpen))
+            {
+                name = name + "." + member;
+            }
+            else
+            {
+                // It's a field access: p.id
+                return new MemberAccessExpr
+                {
+                    Target = new VariableExpr { Name = name, Line = line },
+                    MemberName = member,
+                    Line = line
+                };
+            }
         }
 
         if (Match(TokenType.ParenthesisOpen))
@@ -380,11 +447,15 @@ public class Parser
     {
         int line = Previous().Line;
 
-        // print varName
+        // print <something starting with identifier>
         if (Check(TokenType.Identifier))
         {
-            // if it's a function call like length(arr), parse as full expression
-            if (_cur + 1 < _tokens.Count && _tokens[_cur + 1].Type == TokenType.ParenthesisOpen)
+            // If it's a call (length(x)), member access (p.id), or array access (arr[i]),
+            // parse the whole thing as an expression.
+            if (_cur + 1 < _tokens.Count &&
+                (_tokens[_cur + 1].Type == TokenType.ParenthesisOpen ||
+                 _tokens[_cur + 1].Type == TokenType.Dot ||
+                 _tokens[_cur + 1].Type == TokenType.BracketOpen))
             {
                 var expr = ParseExpression();
                 return new PrintStatement
@@ -394,6 +465,7 @@ public class Parser
                 };
             }
 
+            // plain variable print: print x
             return new PrintStatement { VarName = Advance().Value, Line = line };
         }
 
@@ -610,7 +682,7 @@ public class Parser
         {
             while (!Check(TokenType.ParenthesisClose) && !IsAtEnd())
             {
-                string pType = Consume(TokenType.Type, "Expected parameter type").Value;
+                string pType = ConsumeTypeName("Expected parameter type");
                 string pName = Consume(TokenType.Identifier, "Expected parameter name").Value;
                 parameters.Add(new Parameter { Type = pType, Name = pName });
                 Match(TokenType.Comma);
@@ -654,8 +726,23 @@ public class Parser
         };
     }
 
-    private VariableDeclaration ParseVarDecl()
+    // private VariableDeclaration ParseVarDecl()
+    // {
+    //     int line = Previous().Line;
+    //     string type = Previous().Value;
+    //     string name = Consume(TokenType.Identifier, "Expected variable name").Value;
+    //
+    //     if (!Check(TokenType.Equals))
+    //         return new VariableDeclaration { Type = type, Name = name, Init = null, Line = line };
+    //
+    //     Advance(); // '='
+    //     var init = ParseExpression();
+    //     return new VariableDeclaration { Type = type, Name = name, Init = init, Line = line };
+    // }
+    private VariableDeclaration ParseVarDecl() => ParseVarDeclFromConsumedType();
+    private VariableDeclaration ParseVarDeclFromConsumedType()
     {
+        // type token already consumed into Previous()
         int line = Previous().Line;
         string type = Previous().Value;
         string name = Consume(TokenType.Identifier, "Expected variable name").Value;
@@ -683,10 +770,145 @@ public class Parser
 
         Consume(TokenType.Colon, "Expected ':' after class name");
         SkipNewlines();
-        var body = ParseBlock();
+
+        var body = ParseClassBlock(name);
         return new ClassDeclaration { Name = name, BaseClass = baseClass, Body = body, Line = line };
     }
+    private List<Expression> ParseClassBlock(string className)
+    {
+        var members = new List<Expression>();
+        if (!Match(TokenType.Indent)) return members;
 
+        while (!Check(TokenType.Dedent) && !IsAtEnd())
+        {
+            SkipNewlines();
+            if (Check(TokenType.Dedent)) break;
+
+            // ---- parse modifiers for fields/methods
+            string access = "public";
+            bool isStatic = false;
+
+            while (Check(TokenType.Public) || Check(TokenType.Private) ||
+                   Check(TokenType.Protected) || Check(TokenType.Static))
+            {
+                string mod = Advance().Value;
+                if (mod is "public" or "private" or "protected") access = mod;
+                if (mod == "static") isStatic = true;
+            }
+
+            // ---- constructor: Foo(...)
+            if (Check(TokenType.Identifier) && Peek().Value == className)
+            {
+                members.Add(ParseConstructorDeclaration(className));
+                continue;
+            }
+
+            // ---- method: [mods] TYPE|void name(...)
+            if (IsFunctionDeclaration())
+            {
+                // NOTE: ParseFunctionDeclaration already consumes its own modifiers if present.
+                // We already consumed modifiers above, so we need to "replay" them:
+                // easiest: if you want, remove modifier consumption above and let ParseFunctionDeclaration handle it.
+                // To keep it simple, we handle methods by manual parse here:
+
+                // If we consumed modifiers, then next token must be Type/Void already.
+                // If not consumed, IsFunctionDeclaration will be true anyway.
+
+                // We'll do: if next is Type/Void => parse like function
+                // But we must provide the access we parsed:
+                string retType = Advance().Value; // Type or Void token value
+                string mName = Consume(TokenType.Identifier, "Expected function name").Value;
+
+                var parameters = new List<Parameter>();
+                if (Match(TokenType.ParenthesisOpen))
+                {
+                    while (!Check(TokenType.ParenthesisClose) && !IsAtEnd())
+                    {
+                        string pType = ConsumeTypeName("Expected parameter type");
+                        string pName = Consume(TokenType.Identifier, "Expected parameter name").Value;
+                        parameters.Add(new Parameter { Type = pType, Name = pName });
+                        Match(TokenType.Comma);
+                    }
+                    Consume(TokenType.ParenthesisClose, "Expected ')'");
+                }
+
+                Consume(TokenType.Colon, "Expected ':' after function signature");
+                SkipNewlines();
+                var body = ParseBlock();
+
+                members.Add(new FunctionDeclaration
+                {
+                    Access = access,
+                    ReturnType = retType,
+                    Name = mName,
+                    Parameters = parameters,
+                    Body = body,
+                    Line = Peek().Line
+                });
+                continue;
+            }
+
+            // ---- field: [mods] TYPE name [= expr]
+            if (Match(TokenType.Type))
+            {
+                int fLine = Previous().Line;
+                string fType = Previous().Value;
+                string fName = Consume(TokenType.Identifier, "Expected field name").Value;
+
+                Expression? init = null;
+                if (Match(TokenType.Equals))
+                    init = ParseExpression();
+
+                members.Add(new FieldDeclaration
+                {
+                    Access = access,
+                    IsStatic = isStatic,
+                    Type = fType,
+                    Name = fName,
+                    Init = init,
+                    Line = fLine
+                });
+
+                // finish the line (tolerant)
+                SkipToNewline();
+                continue;
+            }
+
+            // Unknown member: skip line
+            SkipToNewline();
+        }
+
+        Match(TokenType.Dedent);
+        return members;
+    }
+    private ConstructorDeclaration ParseConstructorDeclaration(string className)
+    {
+        int line = Peek().Line;
+        Consume(TokenType.Identifier, "Expected constructor name"); // equals className
+
+        var parameters = new List<Parameter>();
+        Consume(TokenType.ParenthesisOpen, "Expected '(' after constructor name");
+        while (!Check(TokenType.ParenthesisClose) && !IsAtEnd())
+        {
+            string pType = ConsumeTypeName("Expected parameter type");
+            string pName = Consume(TokenType.Identifier, "Expected parameter name").Value;
+            parameters.Add(new Parameter { Type = pType, Name = pName });
+            Match(TokenType.Comma);
+        }
+        Consume(TokenType.ParenthesisClose, "Expected ')'");
+
+        Consume(TokenType.Colon, "Expected ':' after constructor signature");
+        SkipNewlines();
+        var body = ParseBlock();
+
+        return new ConstructorDeclaration
+        {
+            ClassName = className,
+            Parameters = parameters,
+            Body = body,
+            Line = line
+        };
+    }
     private IfStatement ParseIf()
     {
         int line = Previous().Line;
@@ -948,6 +1170,20 @@ public class Parser
     private bool IsAtEnd() => _cur >= _tokens.Count || _tokens[_cur].Type == TokenType.EOF;
     private Token Peek() => _tokens[_cur];
     private Token Previous() => _tokens[_cur - 1];
+
+    private bool IsTypeToken(Token t)
+    {
+        if (t.Type == TokenType.Type) return true;
+        if (t.Type == TokenType.Identifier) return true; // class name type
+        return false;
+    }
+
+    private string ConsumeTypeName(string message)
+    {
+        if (Check(TokenType.Type)) return Advance().Value;
+        if (Check(TokenType.Identifier)) return Advance().Value; // class name
+        throw new CompilerError(ErrorKind.Parser, Peek().Line, message);
+    }
 }
 
 

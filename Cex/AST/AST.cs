@@ -188,7 +188,56 @@ public class ArrayDeclaration : Expression
     public string     Name        { get; set; } = "";
     public Expression Size        { get; set; } = null!;
 }
+// ------------------------------------------------------------------ objects / classes
 
+public class FieldDeclaration : Expression
+{
+    public string Access   { get; set; } = "public";
+    public bool   IsStatic { get; set; } = false;
+
+    public string Type { get; set; } = "";
+    public string Name { get; set; } = "";
+
+    // Only meaningful for static fields (for now). You can also allow const later.
+    public Expression? Init { get; set; }
+}
+
+public class ConstructorDeclaration : Expression
+{
+    public string           ClassName  { get; set; } = "";
+    public List<Parameter>  Parameters { get; set; } = new();
+    public List<Expression> Body       { get; set; } = new();
+}
+
+/// <summary>
+/// Expression that creates an object instance. Example: create.Foo("John","Trump").
+/// Codegen returns pointer in rax.
+/// </summary>
+public class CreateExpr : Expression
+{
+    public string           ClassName { get; set; } = "";
+    public List<Expression> Args      { get; set; } = new();
+}
+
+/// <summary>
+/// Access instance field: obj.name
+/// </summary>
+public class MemberAccessExpr : Expression
+{
+    public Expression Target     { get; set; } = null!;
+    public string     MemberName { get; set; } = "";
+}
+
+/// <summary>
+/// Assign to instance field: obj.name = expr
+/// (We’ll use this to implement constructor auto-assign too, if we want.)
+/// </summary>
+public class MemberAssignmentStatement : Expression
+{
+    public Expression Target     { get; set; } = null!;
+    public string     MemberName { get; set; } = "";
+    public Expression Value      { get; set; } = null!;
+}
 public class ArrayAccess : Expression
 {
     public string     Name  { get; set; } = "";
@@ -214,7 +263,10 @@ public class ClassDeclaration : Expression
     public string?          BaseClass { get; set; }
     public List<Expression> Body      { get; set; } = new();
 }
-
+public class ExpressionStatement : Expression
+{
+    public Expression Expr { get; set; } = null!;
+}
 public class ImportStatement : Expression
 {
     public string Module { get; set; } = "";

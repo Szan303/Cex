@@ -35,7 +35,68 @@ public partial class CodeGenerator
 
         if (p.VarName != null)
         {
-            string type = GetVarType(p.VarName);
+            // ------------------------------------------------------------
+            // NEW: default object printing
+            // print person  => prints person.id if 'person' is a class instance with field 'id'
+            // otherwise => error (forces user to print fields explicitly)
+            // ------------------------------------------------------------
+            string vt = GetVarType(p.VarName);
+            if (_symbols.ClassInfoByName.ContainsKey(vt))
+            {
+                if (TryGetDefaultPrintableField(vt, out var df))
+                {
+                    // load object pointer -> rax
+                    LoadVar(p.VarName, "rax", p.Line);
+
+                    // load default field value into rax
+                    _text.AppendLine($"    mov  rax, [rax+{df.offset}]");
+
+                    // print based on the field type
+                    if (IsArrayType(df.fieldType))
+                    {
+                        // not supported as a default print target (yet)
+                        throw new Cex.CompilerError(Cex.ErrorKind.Codegen, p.Line,
+                            $"Default print for object '{p.VarName}' resolved to array field '{df.fieldName}', which is not supported.");
+                    }
+
+                    if (IsFloatType(df.fieldType))
+                    {
+                        _text.AppendLine("    movq xmm0, rax");
+                        EmitCallPrintFloat(addNewline: true);
+                        return;
+                    }
+
+                    if (df.fieldType == "string")
+                    {
+                        _text.AppendLine("    mov  rdx, rax");
+                        EmitWriteStringRdxNewline();
+                        return;
+                    }
+
+                    if (df.fieldType == "bool")
+                    {
+                        EmitBoolPrint(null, addNewline: true, alreadyInRax: true);
+                        return;
+                    }
+
+                    if (df.fieldType == "char")
+                    {
+                        EmitWriteChar(addNewline: true);
+                        return;
+                    }
+
+                    EmitWriteInt(addNewline: true);
+                    return;
+                }
+
+                throw new Cex.CompilerError(Cex.ErrorKind.Codegen, p.Line,
+                    $"Cannot print object '{p.VarName}' of type '{vt}'. Print fields instead (e.g. {p.VarName}.id).");
+            }
+
+            // ------------------------------------------------------------
+            // existing variable printing
+            // ------------------------------------------------------------
+            string type = vt;
 
             if (IsArrayType(type))
             {

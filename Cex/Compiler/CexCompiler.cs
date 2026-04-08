@@ -20,7 +20,7 @@ public class CexCompiler
 
     public string Compile()
     {
-        // ── find main.ce first, then everything else ──────────────────────
+        // ── find main.ce first, then everything else ─────────────────────���
         string? mainFile = Directory
             .GetFiles(_projectRoot, "main.ce", SearchOption.AllDirectories)
             .FirstOrDefault();
@@ -41,6 +41,9 @@ public class CexCompiler
         // register symbols
         foreach (var unit in units)
             RegisterSymbols(unit);
+
+        // NEW: compute class metadata (fields/offsets/static fields/ctors)
+        _symbols.BuildClassInfo();
 
         // validate calls
         foreach (var unit in units)
@@ -259,6 +262,10 @@ public class CexCompiler
                     ValidateCalls(t.CatchBody,   sourceFile, callerFunction);
                     ValidateCalls(t.FinallyBody, sourceFile, callerFunction);
                     break;
+
+                case ExpressionStatement es:
+                    ValidateExpr(es.Expr, sourceFile, callerFunction);
+                    break;
             }
         }
     }
@@ -271,6 +278,15 @@ public class CexCompiler
                 CheckCall(c.Name, callerFunction, sourceFile);
                 foreach (var arg in c.Args)
                     ValidateExpr(arg, sourceFile, callerFunction);
+                break;
+
+            case CreateExpr ce:
+                foreach (var arg in ce.Args)
+                    ValidateExpr(arg, sourceFile, callerFunction);
+                break;
+
+            case MemberAccessExpr ma:
+                ValidateExpr(ma.Target, sourceFile, callerFunction);
                 break;
 
             case BinaryExpr b:

@@ -13,7 +13,7 @@ public enum TokenType
     ASM,
     True, False, Null,
     Try, Catch, Finally,
-    And, Or, Not,
+    And, Or, Not, Create,
 
     // Types
     Type,           // int, float, string, bool, char

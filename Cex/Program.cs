@@ -50,11 +50,12 @@ class Program
 
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine("===========================================");
-        Console.WriteLine("         C! Compiler");
+        Console.WriteLine("               C! Compiler");
         Console.WriteLine("===========================================");
         Console.ResetColor();
         Console.WriteLine($"Project : {projectRoot}");
         Console.WriteLine($"Output  : {exeFile}");
+        Console.WriteLine($"Version : 0.7.2");
         Console.WriteLine();
 
         try
