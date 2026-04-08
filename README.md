@@ -1,8 +1,8 @@
-# Cex (C!) — v0.7.1
+# Cex (C!) — v0.7.2
 
 Cex is a small indentation-based language that compiles to x86_64 NASM assembly (Windows) and runs via WinAPI (`WriteConsoleA`, `ReadConsoleA`, `ExitProcess`).
 
-This document describes the language features available in **v0.7.0**.
+This document describes the language features available in **v0.7.2**.
 
 ---
 
