@@ -171,6 +171,17 @@ public class InputStatement : Expression
 }
 
 // ------------------------------------------------------------------ arrays
+public class ArrayAddStatement : Expression
+{
+    public string     Name  { get; set; } = "";
+    public Expression Value { get; set; } = null!;
+}
+
+public class ArrayDeleteStatement : Expression
+{
+    public string     Name  { get; set; } = "";
+    public Expression Index { get; set; } = null!;
+}
 public class ArrayDeclaration : Expression
 {
     public string     ElementType { get; set; } = "";
